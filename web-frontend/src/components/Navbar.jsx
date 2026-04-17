@@ -22,17 +22,19 @@ const Navbar = () => {
     return (
         <nav className={`navbar ${scrolled ? 'navbar--scrolled' : ''}`}>
             <div className="navbar-inner">
-                <Link to="/" className="navbar-logo flex items-center gap-1.5 group">
-                    <span className="text-white">WhereIs</span>
-                    <span className="text-[var(--gold)]">My</span>
-                    <span className="text-white">Bus</span>
+                {/* Logo: "Where" white, "Is My" gold, "Bus" white */}
+                <Link to="/" className="navbar-logo flex items-center group" style={{ gap: 0 }}>
+                    <span className="text-white">Where</span>
+                    <span style={{ color: 'var(--gold)' }}>Is My </span>
+                    <span className="text-white"> Bus</span>
                 </Link>
+
                 <div className="navbar-links">
                     {navItems.map(item => (
                         <Link
                             key={item.to}
                             to={item.to}
-                            className={`navbar-link ${pathname === item.to ? 'active' : ''}`}
+                            className={`navbar-link animated-link ${pathname === item.to ? 'active' : ''}`}
                         >
                             <span className="text-[10px] font-black uppercase tracking-[0.2em]">{item.label}</span>
                         </Link>

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import MapBackground from '../components/MapBackground';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -6,33 +6,48 @@ import { useAuth } from '../context/AuthContext';
 import { loginUser, sendOtp, verifyOtp } from '../services/api';
 import HackerLoader from '../components/HackerLoader';
 
+/* Cycling border colors: gold → indigo → emerald → rose → repeat */
+const BORDER_COLORS = [
+    '#f59e0b', // gold
+    '#6366f1', // indigo
+    '#10b981', // emerald
+    '#f43f5e', // rose
+];
+
+function useCyclingColor(interval = 2000) {
+    const [idx, setIdx] = useState(0);
+    useEffect(() => {
+        const t = setInterval(() => setIdx(i => (i + 1) % BORDER_COLORS.length), interval);
+        return () => clearInterval(t);
+    }, [interval]);
+    return BORDER_COLORS[idx];
+}
+
 const Login = () => {
-    const [step, setStep] = useState('credentials'); // 'credentials' | 'otp'
+    const [step, setStep] = useState('credentials'); // 'credentials' | 'otp' | 'forgot'
     const [regNoOrEmail, setRegNoOrEmail] = useState('');
     const [password, setPassword] = useState('');
     const [adminEmail, setAdminEmail] = useState('');
+    const [forgotEmail, setForgotEmail] = useState('');
+    const [forgotSent, setForgotSent] = useState(false);
     const [otp, setOtp] = useState(['', '', '', '']);
     const [error, setError] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const otpRefs = [useRef(), useRef(), useRef(), useRef()];
     const { login } = useAuth();
     const navigate = useNavigate();
+    const borderColor = useCyclingColor(2000);
 
     const handleLogin = async (e) => {
         e.preventDefault();
         setError('');
         setIsLoading(true);
-
         try {
             const data = await loginUser(regNoOrEmail, password);
-            
             if (data.requires_otp && data.target) {
-                // Admin login — need OTP verification
                 setAdminEmail(data.target);
-                // OTP was already sent by the backend; transition to OTP step
                 setStep('otp');
             } else {
-                // Regular user — login immediately
                 login(data);
                 navigate('/dashboard');
             }
@@ -66,11 +81,10 @@ const Login = () => {
         const code = otp.join('');
         if (code.length < 4) { setError('Enter the 4-digit OTP.'); return; }
         setIsLoading(true);
-
         try {
             const data = await verifyOtp(adminEmail, code, false, true);
             if (data.ok && data.user) {
-                login(data); // AuthContext unwraps data.user or data
+                login(data);
                 navigate('/dashboard');
             } else {
                 setError('Verification failed. Please try again.');
@@ -84,12 +98,54 @@ const Login = () => {
 
     const handleResendOtp = async () => {
         setError('');
+        try { await sendOtp(adminEmail, false); }
+        catch (err) { setError('Failed to resend OTP.'); }
+    };
+
+    const handleForgotPassword = async (e) => {
+        e.preventDefault();
+        setError('');
+        setIsLoading(true);
         try {
-            await sendOtp(adminEmail, false);
+            // Send OTP to the provided email for reset
+            await sendOtp(forgotEmail, false);
+            setForgotSent(true);
         } catch (err) {
-            setError('Failed to resend OTP.');
+            setError('Could not send reset link. Check your email/ID.');
+        } finally {
+            setIsLoading(false);
         }
     };
+
+    // Animated glass card wrapper
+    const CardWrapper = ({ children, motionKey }) => (
+        <motion.div
+            key={motionKey}
+            initial={{ opacity: 0, y: 15, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.98 }}
+            transition={{ duration: 0.45, ease: [0.25, 0.46, 0.45, 0.94] }}
+            style={{
+                width: '100%',
+                maxWidth: '420px',
+                padding: '3px',          /* border thickness */
+                borderRadius: '22px',
+                background: `linear-gradient(135deg, ${borderColor}, rgba(255,255,255,0.05) 50%, ${borderColor})`,
+                boxShadow: `0 0 40px ${borderColor}33, 0 30px 60px rgba(0,0,0,0.6)`,
+                transition: 'background 0.8s ease, box-shadow 0.8s ease',
+            }}
+        >
+            <div style={{
+                background: 'rgba(8,8,8,0.88)',
+                backdropFilter: 'blur(40px)',
+                WebkitBackdropFilter: 'blur(40px)',
+                borderRadius: '20px',
+                padding: '2.75rem 2.25rem',
+            }}>
+                {children}
+            </div>
+        </motion.div>
+    );
 
     return (
         <div className="map-page">
@@ -97,16 +153,10 @@ const Login = () => {
             <div className="map-overlay" />
             <div className="map-content">
                 <AnimatePresence mode="wait">
-                    {step === 'credentials' ? (
-                        <motion.div
-                            key="credentials"
-                            className="glass-card"
-                            style={s.card}
-                            initial={{ opacity: 0, y: 15, scale: 0.98 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: -10, scale: 0.98 }}
-                            transition={{ duration: 0.45, ease: [0.25, 0.46, 0.45, 0.94] }}
-                        >
+
+                    {/* ─── CREDENTIALS STEP ─── */}
+                    {step === 'credentials' && (
+                        <CardWrapper motionKey="credentials">
                             <div style={s.header}>
                                 <h2 style={s.title}>Sign In</h2>
                                 <p style={s.sub}>Access your transit dashboard</p>
@@ -125,7 +175,16 @@ const Login = () => {
                                     />
                                 </div>
                                 <div style={s.group}>
-                                    <label className="form-label">Password</label>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <label className="form-label" style={{ marginBottom: 0 }}>Password</label>
+                                        <button
+                                            type="button"
+                                            onClick={() => { setStep('forgot'); setError(''); setForgotSent(false); }}
+                                            style={{ background: 'none', border: 'none', color: borderColor, fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', transition: 'color 0.8s ease' }}
+                                        >
+                                            Forgot Password?
+                                        </button>
+                                    </div>
                                     <input
                                         type="password"
                                         className="form-input"
@@ -135,26 +194,76 @@ const Login = () => {
                                         required
                                     />
                                 </div>
-                                <button className="btn-primary btn-primary--accent" type="submit" disabled={isLoading}>
+                                <button
+                                    className="btn-primary"
+                                    type="submit"
+                                    disabled={isLoading}
+                                    style={{ background: borderColor, color: '#000', transition: 'background 0.8s ease', fontWeight: 800 }}
+                                >
                                     {isLoading ? 'Signing In...' : 'Sign In'}
                                 </button>
                             </form>
                             <div style={s.footer}>
-                                Don't have an account? <Link to="/register" style={{ color: '#818cf8', fontWeight: 600 }}>Register</Link>
+                                Don't have an account?{' '}
+                                <Link to="/register" style={{ color: borderColor, fontWeight: 700, transition: 'color 0.8s ease' }}>Register</Link>
                             </div>
-                        </motion.div>
-                    ) : (
-                        <motion.div
-                            key="otp"
-                            className="glass-card"
-                            style={s.card}
-                            initial={{ opacity: 0, y: 15, scale: 0.98 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: -10, scale: 0.98 }}
-                            transition={{ duration: 0.45, ease: [0.25, 0.46, 0.45, 0.94] }}
-                        >
+                        </CardWrapper>
+                    )}
+
+                    {/* ─── FORGOT PASSWORD STEP ─── */}
+                    {step === 'forgot' && (
+                        <CardWrapper motionKey="forgot">
                             <div style={s.header}>
-                                <div style={s.shieldIcon}>🛡️</div>
+                                <div style={{ fontSize: '2rem', marginBottom: '0.75rem' }}>🔑</div>
+                                <h2 style={s.title}>Reset Password</h2>
+                                <p style={s.sub}>We'll send you a reset link via email</p>
+                            </div>
+                            {error && <div style={s.errorBadge}>{error}</div>}
+                            {forgotSent ? (
+                                <div style={{ textAlign: 'center', padding: '1.5rem 0' }}>
+                                    <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>✅</div>
+                                    <p style={{ color: '#10b981', fontWeight: 700, marginBottom: '0.5rem' }}>Reset link sent!</p>
+                                    <p style={s.sub}>Check your email inbox for instructions.</p>
+                                </div>
+                            ) : (
+                                <form style={s.form} onSubmit={handleForgotPassword}>
+                                    <div style={s.group}>
+                                        <label className="form-label">Email / Registration Number</label>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            placeholder="Enter your registered email or ID"
+                                            value={forgotEmail}
+                                            onChange={(e) => setForgotEmail(e.target.value)}
+                                            required
+                                        />
+                                    </div>
+                                    <button
+                                        className="btn-primary"
+                                        type="submit"
+                                        disabled={isLoading}
+                                        style={{ background: borderColor, color: '#000', transition: 'background 0.8s ease', fontWeight: 800 }}
+                                    >
+                                        {isLoading ? 'Sending...' : 'Send Reset Link'}
+                                    </button>
+                                </form>
+                            )}
+                            <div style={s.footer}>
+                                <button
+                                    onClick={() => { setStep('credentials'); setError(''); }}
+                                    style={{ background: 'none', border: 'none', color: borderColor, fontWeight: 700, cursor: 'pointer', fontSize: '0.85rem', transition: 'color 0.8s ease' }}
+                                >
+                                    ← Back to Sign In
+                                </button>
+                            </div>
+                        </CardWrapper>
+                    )}
+
+                    {/* ─── OTP STEP ─── */}
+                    {step === 'otp' && (
+                        <CardWrapper motionKey="otp">
+                            <div style={s.header}>
+                                <div style={{ fontSize: '2rem', marginBottom: '0.75rem' }}>🛡️</div>
                                 <h2 style={s.title}>Admin Verification</h2>
                                 <p style={s.sub}>
                                     OTP sent to <strong style={{ color: 'rgba(255,255,255,0.7)' }}>{adminEmail}</strong>
@@ -173,31 +282,31 @@ const Login = () => {
                                             value={digit}
                                             onChange={(e) => handleOtpChange(idx, e.target.value)}
                                             onPaste={idx === 0 ? handleOtpPaste : undefined}
-                                            style={s.otpBox}
+                                            style={{ ...s.otpBox, borderColor: borderColor, transition: 'border-color 0.8s ease' }}
                                             autoFocus={idx === 0}
                                         />
                                     ))}
                                 </div>
-                                <button className="btn-primary btn-primary--accent" type="submit" disabled={isLoading}>
-                                    {isLoading ? 'Verifying...' : 'Verify & Access Fleet Control'}
+                                <button
+                                    className="btn-primary"
+                                    type="submit"
+                                    disabled={isLoading}
+                                    style={{ background: borderColor, color: '#000', transition: 'background 0.8s ease', fontWeight: 800 }}
+                                >
+                                    {isLoading ? 'Verifying...' : 'Verify & Access'}
                                 </button>
                             </form>
                             <div style={{ ...s.footer, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                                <button
-                                    onClick={handleResendOtp}
-                                    style={{ background: 'none', border: 'none', color: '#818cf8', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
-                                >
+                                <button onClick={handleResendOtp} style={{ background: 'none', border: 'none', color: borderColor, fontWeight: 700, cursor: 'pointer', fontSize: '0.85rem', transition: 'color 0.8s ease' }}>
                                     Resend OTP
                                 </button>
-                                <button
-                                    onClick={() => { setStep('credentials'); setError(''); setOtp(['','','','']); }}
-                                    style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: '0.8rem' }}
-                                >
+                                <button onClick={() => { setStep('credentials'); setError(''); setOtp(['','','','']); }} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: '0.8rem' }}>
                                     ← Back to Login
                                 </button>
                             </div>
-                        </motion.div>
+                        </CardWrapper>
                     )}
+
                 </AnimatePresence>
             </div>
             <HackerLoader isVisible={isLoading} />
@@ -206,9 +315,7 @@ const Login = () => {
 };
 
 const s = {
-    card: { width: '100%', maxWidth: '400px', padding: '2.75rem 2.25rem' },
     header: { textAlign: 'center', marginBottom: '2rem' },
-    shieldIcon: { fontSize: '2rem', marginBottom: '0.75rem' },
     title: { fontSize: '1.65rem', fontWeight: 800, color: '#ededed', letterSpacing: '-0.5px', marginBottom: '0.25rem' },
     sub: { color: 'rgba(255,255,255,0.35)', fontSize: '0.85rem' },
     form: { display: 'flex', flexDirection: 'column', gap: '1.5rem' },
@@ -232,7 +339,7 @@ const s = {
         fontWeight: 800,
         color: '#ffffff',
         background: 'rgba(255,255,255,0.05)',
-        border: '1px solid rgba(255,255,255,0.12)',
+        border: '2px solid',
         borderRadius: '12px',
         outline: 'none',
         caretColor: '#818cf8',

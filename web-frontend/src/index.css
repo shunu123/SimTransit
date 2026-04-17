@@ -260,17 +260,12 @@ textarea {
 .navbar-logo {
   font-size: 1.15rem;
   font-weight: 800;
-  color: var(--text-1);
   letter-spacing: -0.5px;
   transition: opacity 0.3s ease;
 }
 
 .navbar-logo:hover {
   opacity: 0.75;
-}
-
-.navbar-logo span {
-  color: var(--gold);
 }
 
 .navbar-links {
@@ -288,24 +283,28 @@ textarea {
   transition: color 0.3s ease;
 }
 
-.navbar-link::after {
+/* Animated underline using a sliding gold bar */
+.navbar-link::after,
+.animated-link::after {
   content: '';
   position: absolute;
   bottom: -1px;
   left: 0.8rem;
   right: 0.8rem;
-  height: 1.5px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-bright));
+  height: 2px;
+  background: var(--gold);
   transform: scaleX(0);
   transform-origin: left;
   transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: 2px;
 }
 
 .navbar-link:hover {
   color: var(--text-1);
 }
 
-.navbar-link:hover::after {
+.navbar-link:hover::after,
+.animated-link:hover::after {
   transform: scaleX(1);
 }
 
@@ -316,6 +315,7 @@ textarea {
 .navbar-link.active::after {
   transform: scaleX(1);
 }
+
 
 .navbar-divider {
   width: 1px;
