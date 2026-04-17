@@ -275,8 +275,9 @@ def calculate_speed(lat1, lon1, ts1, lat2, lon2, ts2):
 
 
 # --- GMAIL SMTP CONFIGURATION ---
-SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "whereismybusss@gmail.com")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "gyvdlaqatzejlgvb")
+SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+
 
 
 app = FastAPI(title="College Bus Backend", lifespan=lifespan)
@@ -294,6 +295,7 @@ DB_USER = os.environ.get("DB_USER", "root")
 DB_PASS = os.environ.get("DB_PASS", "")
 DB_NAME = os.environ.get("DB_NAME", "college_bus")
 DB_PORT = int(os.environ.get("DB_PORT", 3307))
+
 
 
 
