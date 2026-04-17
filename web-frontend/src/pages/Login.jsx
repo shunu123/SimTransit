@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import MapBackground from '../components/MapBackground';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -6,22 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import { loginUser, sendOtp, verifyOtp } from '../services/api';
 import HackerLoader from '../components/HackerLoader';
 
-/* Cycling border colors: gold → indigo → emerald → rose → repeat */
-const BORDER_COLORS = [
-    '#f59e0b', // gold
-    '#6366f1', // indigo
-    '#10b981', // emerald
-    '#f43f5e', // rose
-];
-
-function useCyclingColor(interval = 2000) {
-    const [idx, setIdx] = useState(0);
-    useEffect(() => {
-        const t = setInterval(() => setIdx(i => (i + 1) % BORDER_COLORS.length), interval);
-        return () => clearInterval(t);
-    }, [interval]);
-    return BORDER_COLORS[idx];
-}
+const ACCENT = '#f59e0b'; // gold
 
 const Login = () => {
     const [step, setStep] = useState('credentials'); // 'credentials' | 'otp' | 'forgot'
@@ -36,7 +21,7 @@ const Login = () => {
     const otpRefs = [useRef(), useRef(), useRef(), useRef()];
     const { login } = useAuth();
     const navigate = useNavigate();
-    const borderColor = useCyclingColor(2000);
+    const borderColor = ACCENT;
 
     const handleLogin = async (e) => {
         e.preventDefault();
