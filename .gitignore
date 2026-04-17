@@ -2,3 +2,9 @@ build/
 DerivedData/
 xcuserdata/
 *.xcuserstate
+.env
+venv/
+__pycache__/
+*.log
+.DS_Store
+
