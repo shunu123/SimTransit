@@ -1,7 +1,9 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pymysql
 httpx
 pytz
 redis
 websockets
+python-dotenv
+google-generativeai
