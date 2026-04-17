@@ -58,6 +58,16 @@ export const registerStudent = async (studentData) => {
     }
 };
 
+export const resetPassword = async (email, new_password) => {
+    try {
+        const response = await api.post('/reset_password', { email, new_password });
+        return response.data;
+    } catch (error) {
+        throw error.response?.data?.detail || 'Password reset failed.';
+    }
+};
+
+
 export const getStops = async () => {
     try {
         const response = await api.get('/stops');

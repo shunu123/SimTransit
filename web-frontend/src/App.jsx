@@ -11,6 +11,7 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import Profile from './pages/Profile';
 import UserDetails from './pages/UserDetails';
+import ForgotPassword from './pages/ForgotPassword';
 
 const pageVariants = {
   initial: { opacity: 0, y: 8 },
@@ -52,6 +53,7 @@ function App() {
             <Route path="/help" element={<Page><Help /></Page>} />
             <Route path="/login" element={<Page><Login /></Page>} />
             <Route path="/register" element={<Page><Register /></Page>} />
+            <Route path="/forgot-password" element={<Page><ForgotPassword /></Page>} />
             <Route path="/dashboard" element={<Page><Dashboard /></Page>} />
             <Route path="/profile" element={<Page><Profile /></Page>} />
             <Route path="/user-details" element={<Page><UserDetails /></Page>} />
