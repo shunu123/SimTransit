@@ -69,24 +69,23 @@ struct GPSPoint: Codable, Identifiable, Equatable {
     let source: String?      // "realtime" or "schedule"
     
     enum CodingKeys: String, CodingKey {
-        case bus_id, trip_id, lat, status, ts
+        case bus_id, trip_id, status, ts
         case from_stop_name, to_stop_name
         case route_id, route_name
         case ext_vehicle_id, ext_trip_id
         case delay_min, source
-        // Longitude: /gps/live uses 'lon', DB uses 'lng'
-        case lon
-        case lng
-        // Speed: /gps/live uses 'spd' (String), DB uses 'speed' (Double)
-        case spd
-        case speed
-        // Heading: /gps/live uses 'hdg', DB uses 'heading'
-        case hdg
-        case heading
-        // Direction: /gps/live uses 'dir', DB uses 'direction'
-        case dir
-        case direction
-        // Route: /gps/live uses 'rt', DB uses 'route_name'
+        
+        // Longitude variations
+        case lon, lng, longitude
+        // Latitude variations
+        case lat, latitude
+        // Speed variations
+        case spd, speed
+        // Heading variations
+        case hdg, heading
+        // Direction variations
+        case dir, direction
+        // Route variations
         case rt
     }
     
@@ -95,10 +94,13 @@ struct GPSPoint: Codable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         bus_id         = try c.decodeIfPresent(Int.self,    forKey: .bus_id)
         trip_id        = try c.decodeIfPresent(Int.self,    forKey: .trip_id)
-        lat            = (try? c.decode(Double.self, forKey: .lat)) ?? 0
-        // Longitude: try 'lon' first (/gps/live), then 'lng' (DB)
+        lat            = (try? c.decode(Double.self, forKey: .lat)) 
+                      ?? (try? c.decode(Double.self, forKey: .latitude)) 
+                      ?? 0
+        // Longitude: try 'lon' (/gps/live), 'lng' (DB), or 'longitude'
         lng            = (try? c.decode(Double.self, forKey: .lon))
                       ?? (try? c.decode(Double.self, forKey: .lng))
+                      ?? (try? c.decode(Double.self, forKey: .longitude))
                       ?? 0
         // Speed: try 'spd' as String (/gps/live), then 'speed' as Double (DB)
         if let s = try? c.decodeIfPresent(String.self, forKey: .spd) {

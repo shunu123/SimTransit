@@ -44,6 +44,7 @@ final class AppRouter: ObservableObject {
         case adminScheduling
         case adminHistory
         case studentDashboard
+        case nearbyStops
     }
 
     // MARK: - Navigation Methods

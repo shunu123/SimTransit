@@ -6,7 +6,7 @@ struct UniversalMapView: View {
     let route: RouteModel
     let busID: String
     
-    @State private var busLocation = CLLocationCoordinate2D(latitude: 13.0827, longitude: 80.2707)
+    @State private var busLocation = CLLocationCoordinate2D(latitude: 0, longitude: 0)
     @State private var position: MapCameraPosition = .automatic
 
     var body: some View {

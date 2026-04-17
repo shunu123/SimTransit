@@ -6,17 +6,68 @@ struct WSVehicle: Decodable {
     let vid: String?          // vehicle ID
     let rt: String?           // route ID (e.g. "20")
     let des: String?          // destination / headsign
-    let lat: String?
-    let lon: String?
-    let spd: Int?             // speed mph
-    let hdg: String?          // heading degrees
+    let lat: Double?          // Now decoded safely as Double
+    let lon: Double?          // Now decoded safely as Double
+    let spd: Double?          // Now decoded safely as Double
+    let hdg: Double?          // Now decoded safely as Double
     let tmstmp: String?       // timestamp string
     let dly: Bool?            // delayed flag
     let dir: String?          // direction
 
-    // computed helpers
-    var latDouble: Double { Double(lat ?? "") ?? 0 }
-    var lonDouble: Double { Double(lon ?? "") ?? 0 }
+    enum CodingKeys: String, CodingKey {
+        case vid, rt, des, lat, lon, spd, hdg, tmstmp, dly, dir
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        vid    = try container.decodeIfPresent(String.self, forKey: .vid)
+        rt     = try container.decodeIfPresent(String.self, forKey: .rt)
+        des    = try container.decodeIfPresent(String.self, forKey: .des)
+        tmstmp = try container.decodeIfPresent(String.self, forKey: .tmstmp)
+        dly    = try container.decodeIfPresent(Bool.self,   forKey: .dly)
+        dir    = try container.decodeIfPresent(String.self, forKey: .dir)
+        
+        // CUSTOM DECODING: Handle both String and Double for numeric fields
+        // Latitude
+        if let val = try? container.decode(Double.self, forKey: .lat) {
+            lat = val
+        } else if let str = try? container.decode(String.self, forKey: .lat) {
+            lat = Double(str)
+        } else {
+            lat = nil
+        }
+        
+        // Longitude
+        if let val = try? container.decode(Double.self, forKey: .lon) {
+            lon = val
+        } else if let str = try? container.decode(String.self, forKey: .lon) {
+            lon = Double(str)
+        } else {
+            lon = nil
+        }
+        
+        // Speed
+        if let val = try? container.decode(Double.self, forKey: .spd) {
+            spd = val
+        } else if let str = try? container.decode(String.self, forKey: .spd) {
+            spd = Double(str)
+        } else {
+            spd = nil
+        }
+        
+        // Heading
+        if let val = try? container.decode(Double.self, forKey: .hdg) {
+            hdg = val
+        } else if let str = try? container.decode(String.self, forKey: .hdg) {
+            hdg = Double(str)
+        } else {
+            hdg = nil
+        }
+    }
+
+    // Helper properties for consistency with other view models
+    var latDouble: Double { lat ?? 0 }
+    var lonDouble: Double { lon ?? 0 }
 }
 
 struct WSGPSPayload: Decodable {
@@ -29,6 +80,7 @@ struct WSGPSPayload: Decodable {
 /// Singleton that maintains a single WebSocket connection to /ws/gps.
 /// Publishes decoded [WSVehicle] arrays to any subscriber.
 /// Automatically reconnects on disconnect with exponential backoff.
+@MainActor
 final class WebSocketService: NSObject {
     static let shared = WebSocketService()
     private override init() { super.init() }
@@ -47,7 +99,8 @@ final class WebSocketService: NSObject {
     // MARK: - Connect
     func connect() {
         guard task == nil || task?.state != .running else { return }
-        let wsURL = APIConfig.wsBaseURL + "/ws/gps"
+        // FALLBACK: Use the direct WebSocket URL to bypass indexing/scope failures
+        let wsURL = "ws://bujjuus-MacBook-Air.local:8000/ws/gps"
         guard let url = URL(string: wsURL) else {
             print("WebSocketService: invalid URL \(wsURL)")
             return
@@ -74,14 +127,16 @@ final class WebSocketService: NSObject {
     // MARK: - Listen loop
     private func listen() {
         task?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(let message):
-                self.handleMessage(message)
-                self.listen() // chain for next message
-            case .failure(let error):
-                print("WebSocketService receive error: \(error)")
-                self.scheduleReconnect()
+            Task { @MainActor in
+                guard let self = self else { return }
+                switch result {
+                case .success(let message):
+                    self.handleMessage(message)
+                    self.listen() // chain for next message
+                case .failure(let error):
+                    print("WebSocketService receive error: \(error)")
+                    self.scheduleReconnect()
+                }
             }
         }
     }

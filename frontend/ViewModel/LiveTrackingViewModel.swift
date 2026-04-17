@@ -11,6 +11,8 @@ final class LiveTrackingViewModel: ObservableObject {
     @Published var traveledPath: [Coord] = []
     @Published var fullRoutePath: [Coord] = []
     @Published var currentIndex: Double = 0.0
+    @Published var remainingPath: [Coord] = []
+    @Published var connectionToRoute: [Coord] = [] // Segment from GPS to nearest road point
     @Published var autoRecenter: Bool = true
     @Published var isLive: Bool = true
     @Published var isHistorical: Bool = false {
@@ -31,6 +33,39 @@ final class LiveTrackingViewModel: ObservableObject {
     @Published var lastStopTime: String = "--:--"
     @Published var nearestStopName: String = ""
     @Published var nextStopName: String = ""
+    @Published var isLoadingTimeline: Bool = false
+    @Published var isAtStop: Bool = false
+    @Published var now: Date = Date()
+    @Published var currentCoordinate: Coord = Coord(lat: 0, lon: 0)
+    @Published var sourceName: String = ""
+    @Published var destName: String = ""
+    
+    // Requirement: Two-color route visualization (Pickup vs Trip)
+    @Published var pickupPath: [Coord] = []
+    @Published var tripPath: [Coord] = []
+    @Published var isApproachingSource: Bool = false
+    
+    private var lastDirectionsUpdate: Date? = nil
+    private var isFetchingDirections: Bool = false
+    
+    // Arrival and Duration Taken
+    @Published var arrivalAtNextStop: String? = nil
+    @Published var durationTakenMinutes: Int = 0
+    @Published var estimatedDistance: String? = nil
+    @Published var estimatedTime: String? = nil
+    @Published var scheduledArrivalTime: String? = nil
+    @Published var delayStatus: String? = nil
+    private var tripStartTime: Date? = nil
+    
+    // UI Labels for Floating Card
+    @Published var busName: String = ""
+    @Published var durationToDestination: String = "--"
+    
+    var currentTimeString: String {
+        let df = DateFormatter()
+        df.dateFormat = "h:mm"
+        return df.string(from: now)
+    }
     
     var plannedPolyline: [Coord] {
         return fullRoutePath
@@ -123,6 +158,13 @@ final class LiveTrackingViewModel: ObservableObject {
 
     @Published var actualOnRouteSegments: [PathSegment] = []
     @Published var actualOffRouteSegments: [PathSegment] = []
+    
+    // Apple Maps Integration
+    @Published var appleMapsETAs: [String: Int] = [:]
+    private var lastETARefresh: Date = .distantPast
+
+    @Published var isWaitingForGPS: Bool = true
+    private var lastLiveUpdate: Date = .distantPast
 
     private func updatePathSegments() {
         let fullRoute = fullRoutePath
@@ -133,7 +175,6 @@ final class LiveTrackingViewModel: ObservableObject {
             return 
         }
         
-        // Use a simpler approach for segment calculation
         var onSegs: [PathSegment] = []
         var offSegs: [PathSegment] = []
         
@@ -178,137 +219,207 @@ final class LiveTrackingViewModel: ObservableObject {
         self.bus = bus
         self.sourceStop = sourceStop
         self.destinationStop = destinationStop
-        self.sourceCoord = sourceCoord
-        self.destinationCoord = destinationCoord
+        
+        self.sourceName = sourceStop ?? bus.route.startPointName
+        self.destName = destinationStop ?? bus.route.endPointName
+        self.busName = bus.number
+        
+        // Defensive: Ignore 0,0 coordinates which cause map to jump to equator
+        self.sourceCoord = (sourceCoord?.lat == 0 && sourceCoord?.lon == 0) ? nil : sourceCoord
+        self.destinationCoord = (destinationCoord?.lat == 0 && destinationCoord?.lon == 0) ? nil : destinationCoord
         self.selectedDate = date ?? Date()
         
-        // 1. Filter stops relative to source and destination if provided
+        // Immediate initialization of header names from search results
+        if let source = sourceStop { self.bus.route.startPointName = source }
+        if let destination = destinationStop { self.bus.route.endPointName = destination }
+        
+        // 1. FILTER STOPS PERSISTENTLY (CRITICAL: NEVER EMPTY)
         var displayStops = bus.route.stops
         if let source = sourceStop, let destination = destinationStop {
             displayStops = bus.stopsFromTo(sourceName: source, destinationName: destination)
         } else if let source = sourceStop {
             displayStops = bus.stopsFrom(sourceName: source)
         }
-        self.displayedStops = displayStops
         
-        // 2. Build path from relevant stops only
+        // If bus.route.stops was empty (e.g. from a search that didn't fetch full timeline yet)
+        // ensure we atleast have the source/destination as pseudo-stops if coordinates mapping exists
+        if displayStops.isEmpty {
+             if let sName = sourceStop, let sC = sourceCoord {
+                 displayStops.append(Stop(id: "source", name: sName, coordinate: sC, timeText: "08:00", isMajorStop: true, stopOrder: 0))
+             }
+             if let dName = destinationStop, let dC = destinationCoord {
+                 displayStops.append(Stop(id: "dest", name: dName, coordinate: dC, timeText: "09:00", isMajorStop: true, stopOrder: 999))
+             }
+        }
+        
+        self.displayedStops = displayStops
+        print("LiveTrackingViewModel: Initialized with \(displayStops.count) stops (Source: \(sourceStop ?? "nil"))")
+
+        // 2. Build path from relevant stops immediately
         let plannedPath = TrackingSimulationService.shared.buildPath(stops: displayStops)
         self.bus.route.plannedPolyline = plannedPath
+        self.fullRoutePath = plannedPath
         
-        let path = plannedPath
-        
-        self.fullRoutePath = path
         if isHistorical || isFuture {
-            self.traveledPath = isFuture ? [] : path
-            let maxIndex = max(0, path.count - 1)
-            self.currentIndex = isFuture ? 0.0 : Double(maxIndex)
+            self.traveledPath = isFuture ? [] : plannedPath
+            self.currentIndex = isFuture ? 0.0 : Double(max(0, plannedPath.count - 1))
         } else {
             self.traveledPath = []
             self.currentIndex = 0.0
             
-            // Load other buses on the same route
+            // Load other buses for context
             let all = BusRepository.shared.allBuses
             self.otherBuses = all.filter { b in
                 b.id != bus.id && 
                 b.route.from == bus.route.from && 
-                b.route.to == bus.route.to &&
-                b.trackingStatus != .scheduled && b.trackingStatus != .ended
+                b.route.to == bus.route.to
             }
-            self.otherBusIndices = Array(repeating: 0.0, count: self.otherBuses.count)
         }
+        
+        // COORDINATE: Default to (0,0) if no telemetry is present. 
+        // DO NOT fallback to first stop as it causes fake pins.
+        self.currentCoordinate = bus.currentCoordinate ?? Coord(lat: 0, lon: 0)
+        print("LiveTrackingViewModel: Initial coordinate set to \(self.currentCoordinate.lat), \(self.currentCoordinate.lon)")
+        
+        // Reset stale search data
+        self.estimatedDistance = nil
+        self.estimatedTime = nil
+        self.delayStatus = nil
         
         loadHistoryData()
         
-        if self.bus.route.stops.isEmpty {
-            print("LiveTrackingViewModel: Stops empty, fetching timeline...")
-            loadTimelineIfNeeded()
-        } else {
-            // Trigger road snapping after loading stops
-            print("LiveTrackingViewModel: Stops exist (\(self.bus.route.stops.count)), snapping...")
+        // Always try to refresh timeline info from backend, but never clear existing stops if it fails
+        self.isLoadingTimeline = displayStops.isEmpty
+        loadTimelineIfNeeded()
+        
+        // Always trigger road snapping (Apple Maps road matching)
+        if !displayStops.isEmpty {
             snapToRoads()
-            // Even if stops exist, refresh timeline to ensure it's up to date
-            loadTimelineIfNeeded()
         }
+        
+        // Initialize scheduled arrival time from bus or last stop
+        self.scheduledArrivalTime = bus.arrivalsAt
     }
 
+    @Published var isUsingDBPath: Bool = false
+    
     private func snapToRoads() {
         let stopsSnapshot = displayedStops
         Task {
             let snapped = await RoadSnapService.shared.snap(stops: stopsSnapshot)
             await MainActor.run {
+                // If we get a valid snapped roadmap, always prefer it over the straight-line skeleton
                 if !snapped.isEmpty {
                     self.fullRoutePath = snapped
+                    self.remainingPath = snapped // Initialize remaining path so bold line shows up
                     print("Road snapping success: \(snapped.count) points")
                 }
             }
         }
     }
     
+    private func decodeDBPolyline(_ poly: String) -> [Coord] {
+        // 1. Try JSON Decoding (Recommended: [{"lat": 1.2, "lng": 3.4}, ...])
+        if let data = poly.data(using: .utf8) {
+            struct DBPoint: Codable { let lat: Double; let lng: Double }
+            if let points = try? JSONDecoder().decode([DBPoint].self, from: data) {
+                return points.map { Coord(lat: $0.lat, lon: $0.lng) }
+            }
+        }
+        
+        // 2. Try Pipe/Comma format decoding (Fallback: lat,lng|lat,lng)
+        let pairs = poly.components(separatedBy: "|")
+        if pairs.count > 1 {
+            var coords: [Coord] = []
+            for pair in pairs {
+                let parts = pair.components(separatedBy: ",")
+                if parts.count == 2, let lat = Double(parts[0].trimmingCharacters(in: .whitespaces)), 
+                   let lon = Double(parts[1].trimmingCharacters(in: .whitespaces)) {
+                    coords.append(Coord(lat: lat, lon: lon))
+                }
+            }
+            if !coords.isEmpty { return coords }
+        }
+        
+        return []
+    }
+    
     private func loadTimelineIfNeeded() {
         Task {
             do {
-                print("LiveTrackingViewModel: Fetching timeline for trip \(bus.vehicleId ?? 0) (ext: \(bus.extTripId ?? "nil"))...")
-                let timelineStops = try await APIService.shared.fetchTimeline(tripId: bus.vehicleId, extTripId: bus.extTripId)
-                print("LiveTrackingViewModel: Successfully fetched \(timelineStops.count) stops from timeline.")
-                
-                var newStops: [Stop] = []
-                if timelineStops.isEmpty {
-                    print("LiveTrackingViewModel: Timeline stops are empty.")
-                    newStops = []
-                } else {
-                    newStops = timelineStops.sorted { $0.stopOrder < $1.stopOrder }.map { $0.toStop() }
-                    print("LiveTrackingViewModel: Parsed \(newStops.count) stops into ViewModel.")
+                let idParam = bus.extTripId ?? (bus.vehicleId != nil ? "\(bus.vehicleId!)" : nil)
+                guard let identifier = idParam, identifier != "0" else {
+                    print("LiveTrackingViewModel: No valid trip identifier found for bus \(bus.number). Using original stops.")
+                    await MainActor.run { 
+                        self.isLoadingTimeline = false 
+                        if self.displayedStops.isEmpty {
+                            self.displayedStops = self.bus.route.stops
+                        }
+                    }
+                    return
                 }
+                print("LiveTrackingViewModel: Fetching timeline for trip \(identifier)...")
+                let result = try await APIService.shared.fetchTimeline(tripId: bus.vehicleId, extTripId: bus.extTripId)
+                let timelineStops = result.stops
+                let dbPolylineString = result.polyline
+                
+                let newStops = timelineStops.sorted { $0.stopOrder < $1.stopOrder }.map { $0.toStop() }
                 
                 await MainActor.run {
-                    self.bus.route.stops = newStops
-                    
-                    // Re-filter displayedStops
-                    var displayStops = self.bus.route.stops
-                    if let source = self.sourceStop, let destination = self.destinationStop {
-                        displayStops = self.bus.stopsFromTo(sourceName: source, destinationName: destination)
-                    } else if let source = self.sourceStop {
-                        displayStops = self.bus.stopsFrom(sourceName: source)
+                    if let poly = dbPolylineString, !poly.isEmpty {
+                        // Attempt to decode database polyline
+                        let coords = self.decodeDBPolyline(poly)
+                        if !coords.isEmpty {
+                            withAnimation(.easeInOut(duration: 0.8)) {
+                                self.fullRoutePath = coords
+                                self.remainingPath = coords // Default to full path so bold blue line shows up
+                                self.isUsingDBPath = true // Crucial: Prevents road-snap from overwriting high-res path
+                                self.bus.route.plannedPolyline = coords // Ensures MapPolyline renders these specific coords
+                            }
+                            print("LiveTrackingViewModel: Using high-resolution path from database (\(coords.count) points)")
+                        }
                     }
-                    self.displayedStops = displayStops
-                    
-                    // Repopulate historyStops now that we have real stops
-                    if !self.isHistorical {
-                        self.bus.historyStops = displayStops.map { HistoryStop(stopName: $0.name, reachedTime: nil) }
+
+                    if !newStops.isEmpty {
+                        print("LiveTrackingViewModel: Received \(newStops.count) stops from backend for \(identifier). Updating UI...")
+                        self.bus.route.stops = newStops
+                        
+                        // Re-filter displayedStops for the active segment
+                        var displayStops = newStops
+                        if let source = self.sourceStop, let destination = self.destinationStop {
+                             // Use bus helper or local filtering
+                             displayStops = self.bus.stopsFromTo(sourceName: source, destinationName: destination)
+                        } 
+                        
+                        withAnimation {
+                            self.displayedStops = displayStops
+                            // Requirement: Replace generic header labels with actual start/end stop names
+                            self.bus.route.startPointName = displayStops.first?.name ?? "Start"
+                            self.bus.route.endPointName = displayStops.last?.name ?? "End"
+                        }
+                        
+                        print("LiveTrackingViewModel: UI refreshed with actual schedule names.")
+                        
+                        // If we didn't have a DB polyline but got new stops, trigger a road snap
+                        if !self.isUsingDBPath {
+                            self.snapToRoads()
+                        }
                     }
-                    
-                    // Re-build planned path
-                    let plannedPath = TrackingSimulationService.shared.buildPath(stops: displayStops)
-                    self.bus.route.plannedPolyline = plannedPath
-                    
-                    let path = plannedPath
-                    
-                    self.fullRoutePath = path
-                    if !self.isHistorical && !self.isFuture {
-                        self.traveledPath = []
-                        self.currentIndex = 0.0
-                    } else {
-                        self.traveledPath = self.isFuture ? [] : path
-                        self.currentIndex = self.isFuture ? 0.0 : Double(max(0, path.count - 1))
-                    }
-                    
-                    self.snapToRoads()
-                    
-                    // Cache the stops globally so other views don't have to refetch
-                    BusRepository.shared.register(bus: self.bus)
+                    self.isLoadingTimeline = false
+                    recalculateTwoColorPaths()
                 }
             } catch {
-                print("Failed to load timeline for bus \(self.bus.number):", error)
-                // Fallback: If fetch fails, but we have original stops, don't clear them
-                await MainActor.run {
-                    if self.displayedStops.isEmpty && !self.bus.route.stops.isEmpty {
-                        self.displayedStops = self.bus.route.stops
-                        self.snapToRoads()
+                print("LiveTrackingViewModel: Error loading timeline - \(error.localizedDescription)")
+                await MainActor.run { 
+                    self.isLoadingTimeline = false 
+                    if self.displayedStops.isEmpty {
+                         self.displayedStops = self.bus.route.stops
                     }
                 }
             }
         }
     }
+
 
     private func populateScheduledHistory() {
         let stopsToTrack = self.displayedStops.isEmpty ? self.bus.route.stops : self.displayedStops
@@ -352,27 +463,32 @@ final class LiveTrackingViewModel: ObservableObject {
                 return
             }
             
+            let dateStr = {
+                let f = DateFormatter()
+                f.dateFormat = "yyyy-MM-dd"
+                return f.string(from: self.selectedDate)
+            }()
+            
             Task {
                 do {
-                    let gpsPoints = try await APIService.shared.fetchTripHistory(tripId: tripId)
+                    let gpsPoints = try await APIService.shared.fetchTripHistory(tripId: tripId, date: dateStr)
                     await MainActor.run {
                         if gpsPoints.isEmpty {
                             self.isHistoryEmpty = true
-                            print("No history GPS points found for trip \(tripId)")
+                            print("No history GPS points found for trip \(tripId) on \(dateStr)")
                         } else {
                             self.isHistoryEmpty = false
                             self.historyTripStatus = "Completed"
                             self.traveledPath = gpsPoints.map { Coord(lat: $0.lat, lon: $0.lng) }
                             if let last = self.traveledPath.last {
-                                if let closestIdx = findClosestIndex(on: fullRoutePath, to: last) {
-                                    self.currentIndex = Double(closestIdx)
-                                }
+                                let closestIdx = findClosestIndex(on: fullRoutePath, to: last)
+                                self.currentIndex = Double(closestIdx)
                             }
-                            print("Loaded \(gpsPoints.count) history points for trip \(tripId)")
+                            print("Loaded \(gpsPoints.count) history points for trip \(tripId) on \(dateStr)")
                         }
                     }
                 } catch {
-                    print("Failed to load history for trip \(tripId): \(error.localizedDescription)")
+                    print("Failed to load history for trip \(tripId) on \(dateStr): \(error.localizedDescription)")
                     await MainActor.run { self.isHistoryEmpty = true }
                 }
             }
@@ -388,9 +504,11 @@ final class LiveTrackingViewModel: ObservableObject {
 
     var stops: [Stop] { displayedStops }
 
-    var currentCoordinate: Coord {
-        if fullRoutePath.isEmpty { return bus.route.stops.first?.coordinate ?? Coord(lat: 13.0287, lon: 80.0071) }
-        let idx = Int(min(currentIndex, Double(fullRoutePath.count - 1)))
+    var __unused_coord: Coord {
+        if fullRoutePath.isEmpty { 
+            return bus.route.stops.first?.coordinate ?? Coord(lat: 0, lon: 0) 
+        }
+        let idx = Int(min(currentIndex, Double(max(0, fullRoutePath.count - 1))))
         return fullRoutePath[idx]
     }
 
@@ -409,67 +527,53 @@ final class LiveTrackingViewModel: ObservableObject {
         Task {
             do {
                 print("LiveTrackingViewModel: Syncing full details for Route \(finalRt), VID \(finalVid)...")
+                // Only show loading if we have NO stops yet
+                if self.displayedStops.isEmpty { self.isLoadingTimeline = true }
+                
                 let details = try await APIService.shared.fetchFullTripDetails(routeId: finalRt, direction: dir, vehicleId: finalVid)
                 
                 await MainActor.run {
+                    self.isLoadingTimeline = false
                     // 1. Update Polylines
                     if !details.polyline.isEmpty {
                         self.fullRoutePath = details.polyline.map { Coord(lat: $0.lat, lon: $0.lng) }
                     }
                     
                     // 2. Update Timeline / Stops
-                    let newStops = details.timeline.map { stop in
-                        Stop(
-                            id: stop.stop_id,
-                            name: stop.stop_name,
-                            coordinate: Coord(lat: Double(stop.lat) ?? 0, lon: Double(stop.lng) ?? 0),
-                            timeText: stop.eta,
-                            isMajorStop: stop.is_major,
-                            stopOrder: 0
-                        )
-                    }
-
+                    let newStops = details.timeline.map { $0.toStop() }
                     
-                    self.displayedStops = newStops
-                    self.bus.route.stops = newStops
-                    
-                    // 3. Update History Status
-                    self.bus.historyStops = details.timeline.map { stop in
-                        HistoryStop(
-                            stopName: stop.stop_name, 
-                            coordinate: Coord(lat: Double(stop.lat) ?? 0, lon: Double(stop.lng) ?? 0),
-                            reachedTime: stop.status == "Reached" ? stop.eta : nil
-                        )
-                    }
-                    
-                    // 4. Update Current Location
-                    if let liveLoc = details.live_location {
-                        let point = Coord(lat: liveLoc.lat, lon: liveLoc.lon)
-                        if self.traveledPath.isEmpty || distance(self.traveledPath.last ?? point, point) > 0.0001 {
-                            self.traveledPath.append(point)
-                        }
-                        self.bus.actualPolyline = self.traveledPath
+                    if !newStops.isEmpty {
+                        self.bus.route.stops = newStops
                         
-                        // Find closest index on polyline to position marker
-                        if let closestIdx = findClosestIndex(on: fullRoutePath, to: point) {
-                             withAnimation(.linear(duration: 0.5)) {
-                                 self.currentIndex = Double(closestIdx)
-                             }
-                             
-                             let totalPoints = Double(fullRoutePath.count)
-                             let stopsCount = Double(max(1, displayedStops.count))
-                             let currentStopIdxInt = Int(Double(closestIdx) / max(1, (totalPoints / stopsCount)))
-                             self.bus.currentStopIndex = currentStopIdxInt
-                             
-                             // Update labels
-                             if currentStopIdxInt < displayedStops.count {
-                                 self.nearestStopName = displayedStops[currentStopIdxInt].name
-                             }
-                             if currentStopIdxInt + 1 < displayedStops.count {
-                                 self.nextStopName = displayedStops[currentStopIdxInt + 1].name
-                             }
+                        // 3. Update History Status
+                        self.bus.historyStops = details.timeline.map { stop in
+                            HistoryStop(
+                                stopName: stop.stopName, 
+                                coordinate: Coord(lat: stop.lat, lon: stop.lng),
+                                reachedTime: stop.status == "Reached" ? stop.eta : nil
+                            )
                         }
+                    } else if self.displayedStops.isEmpty {
+                        // Fallback if timeline is empty but we expected data
+                        print("LiveTrackingViewModel: Warning - Backend returned empty timeline")
                     }
+                    
+                    // 4. Update Current Location via Gateway
+                    // Instead of manual direct assignment (which causes jumping), 
+                    // we route the API location through our central validation gateway.
+                    if let liveLoc = details.live_location {
+                        self.handleGPSUpdate(
+                            lat: liveLoc.lat, 
+                            lon: liveLoc.lon, 
+                            speed: 0, // Speed can stay 0 here as it's a fallback API
+                            bearing: nil, 
+                            isFromWebSocket: false
+                        )
+                    }
+                    
+                    // Ensure road-aware paths and timeline UI are updated
+                    self.recalculateDisplayedStops()
+                    self.recalculateTwoColorPaths()
                 }
             } catch {
                 print("LiveTrackingViewModel: Full details sync failed:", error)
@@ -498,6 +602,22 @@ final class LiveTrackingViewModel: ObservableObject {
             }
             return
         }
+
+        // Fetch historical path for the current trip to show previous movement
+        if let tid = bus.vehicleId {
+            Task {
+                do {
+                    let points = try await APIService.shared.fetchTripCoordinates(tripId: tid)
+                    await MainActor.run {
+                        self.traveledPath = points
+                        self.autoRecenter = true
+                        self.updateNextStopInfo()
+                    }
+                } catch {
+                    print("Error fetching trip coordinates: \(error)")
+                }
+            }
+        }
         
         isLive = true
         
@@ -507,42 +627,54 @@ final class LiveTrackingViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] (vehicles: [WSVehicle]) in
                 guard let self = self else { return }
-                // Filter for our specific bus (vid or route/number match)
-                if let update: WSVehicle = vehicles.first(where: { ($0.vid ?? "") == (self.bus.extTripId ?? "") || ($0.rt ?? "") == self.bus.number }) {
-                    // 1. Update Position & Path with smooth animation
-                    let point = Coord(lat: update.latDouble, lon: update.lonDouble)
-                    withAnimation(.linear(duration: 0.95)) {
-                        if self.traveledPath.isEmpty || self.distance(self.traveledPath.last ?? point, point) > 0.0001 {
-                            self.traveledPath.append(point)
-                        }
-                        self.bus.actualPolyline = self.traveledPath
-                    }
+                // Normalizing IDs for matching (handling "Bus 1" vs "Bus1" vs "1")
+                let cleanOurTripId = (self.bus.extTripId ?? "").replacingOccurrences(of: " ", with: "").lowercased()
+                let cleanOurBusNo = self.bus.number.replacingOccurrences(of: " ", with: "").lowercased().replacingOccurrences(of: "bus", with: "")
+                
+                if let update = vehicles.first(where: { 
+                    let vVid = ($0.vid ?? "").replacingOccurrences(of: " ", with: "").lowercased().replacingOccurrences(of: "bus", with: "")
+                    let vRt = ($0.rt ?? "").replacingOccurrences(of: " ", with: "").lowercased().replacingOccurrences(of: "bus", with: "")
 
-                    // 2. Update Telemetry
-                    self.bus.liveTelemetry.speed = Double(update.spd ?? 0)
-                    self.bus.liveTelemetry.bearing = Double(update.hdg ?? "0") ?? 0
-                    self.bus.liveTelemetry.speedKmph = Int(Double(update.spd ?? 0) * 1.60934)
-                    self.bus.liveTelemetry.lastUpdate = Date()
-                    
-                    // 3. Find closest index on polyline to position marker
-                    if let closestIdx = self.findClosestIndex(on: self.fullRoutePath, to: point) {
-                         withAnimation(.linear(duration: 0.5)) {
-                             self.currentIndex = Double(closestIdx)
-                         }
-                    }
-                    
-                    // Trigger state refresh logic
-                    self.tick()
+                    // Aggressive Matching: Check if numeric ID parts match or route name matches bus number
+                    return (!cleanOurTripId.isEmpty && vVid.contains(cleanOurTripId)) || 
+                           (!cleanOurBusNo.isEmpty && vVid == cleanOurBusNo) ||
+                           (!cleanOurBusNo.isEmpty && vRt.contains(cleanOurBusNo))
+                }) {
+                    // Trigger centralized GPS processing
+                    self.handleGPSUpdate(
+                        lat: update.latDouble, 
+                        lon: update.lonDouble, 
+                        speed: update.spd, 
+                        bearing: update.hdg, 
+                        isFromWebSocket: true
+                    )
                 }
             }
         
         // 2. Throttled Animation Timer (1.0s)
         // Every 1.0s we move bit by bit to reduce CPU load and keep movement smooth
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                self.tick()
-                // Periodic full sync (REST fallback) every 10s if needed
+        // 3. HTTP Polling Backup (Reliable Database Source)
+        Task {
+            while isLive {
+                do {
+                    // Use extTripId first, fallback to normalized bus number (e.g. "Bus 1" -> "Bus1")
+                    let tidForPolling = bus.extTripId ?? bus.number.replacingOccurrences(of: " ", with: "")
+                    if let latest = try await APIService.shared.fetchTripLatestGPS(tripId: bus.vehicleId, extTripId: tidForPolling) {
+                        await MainActor.run {
+                            self.handleGPSUpdate(
+                                lat: latest.lat, 
+                                lon: latest.lng, 
+                                speed: latest.speed, 
+                                bearing: nil, 
+                                isFromWebSocket: false
+                            )
+                        }
+                    }
+                } catch {
+                    print("LiveTrackingViewModel: GPS Polling error: \(error)")
+                }
+                
+                try? await Task.sleep(nanoseconds: 5_000_000_000) // Poll every 5 seconds
             }
         }
     }
@@ -556,6 +688,7 @@ final class LiveTrackingViewModel: ObservableObject {
     }
 
     func stop() {
+        isLive = false // Stop polling loop
         timer?.invalidate()
         timer = nil
         wsSubscription?.cancel()
@@ -563,7 +696,15 @@ final class LiveTrackingViewModel: ObservableObject {
     }
 
     private func tick() {
+        self.now = Date()
         updatePathSegments()
+        
+        // Update isAtStop status
+        if !displayedStops.isEmpty && bus.currentStopIndex < displayedStops.count {
+            let stop = displayedStops[bus.currentStopIndex]
+            let dist = distance(currentCoordinate, stop.coordinate)
+            isAtStop = dist < 0.0005 // Approx 50 meters
+        }
         
         // Fast polling for the specific bus we are tracking (every 15s as a fallback to websockets)
         if !isHistorical {
@@ -571,6 +712,11 @@ final class LiveTrackingViewModel: ObservableObject {
             if fastPollingTick >= 15 {
                 fastPollingTick = 0
                 syncWithFullDetails()
+            }
+            
+            // APPLE MAPS ETA REFRESH (Every 1 minute)
+            if Date().timeIntervalSince(lastETARefresh) > 60 {
+                refreshAppleMapsETAs()
             }
         }
 
@@ -594,19 +740,41 @@ final class LiveTrackingViewModel: ObservableObject {
         }
     }
     
-    private func findClosestIndex(on path: [Coord], to target: Coord) -> Int? {
-        var minDst = Double.greatestFiniteMagnitude
-        var minIdx: Int? = nil
-        let strideVal = 5
-        for i in stride(from: 0, to: path.count, by: strideVal) {
-            let dst = distance(path[i], target)
-            if dst < minDst {
-                minDst = dst
-                minIdx = i
-            }
+    func updateNextStopInfo() {
+        let stops = displayedStops
+        guard !stops.isEmpty else { return }
+        
+        // 1. Find the trip progress: find the nearest point on the full route path
+        
+        
+        // 2. Find Nearest Stop and Next Stop
+        // Heuristic: Find the stop with the smallest distance that hasn't been passed.
+        // A stop is "passed" if its stopOrder is less than our current estimated stop index.
+        
+        let pathCount = Double(max(1, fullRoutePath.count))
+        let stopsCount = Double(max(1, stops.count))
+        let pointsPerStop = pathCount / stopsCount
+        
+        let currentPassIdx = Int(currentIndex / max(1.0, pointsPerStop))
+        
+        // The display logic for next stop
+        if currentPassIdx + 1 < stops.count {
+            let targetStop = stops[currentPassIdx + 1]
+            self.nextStopName = targetStop.name
+            self.arrivalAtNextStop = targetStop.timeText
+        } else {
+            self.nextStopName = "Destination Reached"
+            self.arrivalAtNextStop = "--:--"
         }
-        return minIdx
+        
+        // 3. Final Destination Duration
+        if let mins = self.appleMapsETAs["destination"] {
+            self.durationToDestination = "\(mins) min"
+        } else if let last = stops.last {
+            self.durationToDestination = last.timeText ?? "--"
+        }
     }
+    
     
     // updateOtherBuses removed as we rely on backend data
     private func updateOtherBuses() {
@@ -623,7 +791,8 @@ final class LiveTrackingViewModel: ObservableObject {
         let stopsCount = Double(max(1, displayedStops.count))
         let pathCount = Double(max(1, fullRoutePath.count))
         let liveIndexValue = (busToTrack.id == bus.id) ? Int(currentIndex / (pathCount / stopsCount)) : busToTrack.currentStopIndex
-        let clampedIndex = min(max(0, liveIndexValue), displayedStops.count - 1)
+        
+        let clampedIndex = min(max(0, liveIndexValue), max(0, displayedStops.count - 1))
         if clampedIndex + 1 < displayedStops.count {
             return displayedStops[clampedIndex + 1]
         }
@@ -631,54 +800,206 @@ final class LiveTrackingViewModel: ObservableObject {
     }
     
     func etaToStop(index: Int) -> Int {
-        guard !displayedStops.isEmpty, !fullRoutePath.isEmpty, index < displayedStops.count else { return 0 }
+        guard index >= 0, index < displayedStops.count else { return 0 }
+        let stop = displayedStops[index]
+        return appleMapsETAs[stop.id] ?? 0
+    }
+
+    private func parseTimeToday(_ timeStr: String) -> Date? {
+        let ist = TimeZone(identifier: "Asia/Kolkata") ?? TimeZone(secondsFromGMT: 19800)!
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        f.timeZone = ist
+        guard let timeDate = f.date(from: timeStr) else { return nil }
         
-        // 1. If we have a real-time arrival date from the backend, use it
-        if let arrivalDate = displayedStops[index].realtimeArrival {
-            let diff = arrivalDate.timeIntervalSinceNow
-            if diff > 0 {
-                return Int(ceil(diff / 60.0))
-            } else if diff > -30 { // Just arrived or within 30s
-                return 0
+        let calendar = Calendar.current
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: Date())
+        let timeComps = calendar.dateComponents([.hour, .minute, .second], from: timeDate)
+        components.hour = timeComps.hour
+        components.minute = timeComps.minute
+        components.second = timeComps.second
+        
+        return calendar.date(from: components)
+    }
+
+    private func refreshAppleMapsETAs() {
+        // Requirement 1 & 3: Handle Not Running or No GPS
+        guard bus.isRunning, 
+              currentCoordinate.lat != 0, 
+              !fullRoutePath.isEmpty else {
+            // Fallback to scheduled: Clear any stale live ETAs
+            if !displayedStops.isEmpty {
+                for i in 0..<displayedStops.count {
+                    displayedStops[i].realtimeEta = nil
+                    displayedStops[i].realtimeDepartureEta = nil
+                }
+                self.estimatedTime = nil
+                self.delayStatus = "Scheduled"
             }
+            return 
         }
         
-        // 2. Fallback to distance-based calculation
+        let currentPos = currentCoordinate.cl
+        let busIdx = findClosestIndex(on: fullRoutePath, to: currentCoordinate)
+        
+        Task {
+            // 1. Only call Apple Maps for the Final Destination
+            let lastIdx = displayedStops.count - 1
+            guard lastIdx >= 0 else { return }
+            let destinationStop = displayedStops[lastIdx]
+            
+            let request = MKDirections.Request()
+            request.source = MKMapItem(location: CLLocation(latitude: currentPos.latitude, longitude: currentPos.longitude), address: nil)
+            request.destination = MKMapItem(location: CLLocation(latitude: destinationStop.coordinate.cl.latitude, longitude: destinationStop.coordinate.cl.longitude), address: nil)
+            request.transportType = .automobile
+            
+            do {
+                let response = try await MKDirections(request: request).calculate()
+                if let route = response.routes.first {
+                    let totalMins = Int(route.expectedTravelTime / 60.0)
+                    let distMeters = calculatePathDistance(fromIndex: busIdx, toIndex: findClosestIndex(on: fullRoutePath, to: destinationStop.coordinate))
+                    let distKm = distMeters / 1000.0
+                    
+                    await MainActor.run {
+                        self.estimatedDistance = String(format: "%.1f km", distKm)
+                        self.estimatedTime = "\(totalMins) min"
+                        self.appleMapsETAs["destination"] = totalMins
+                        self.updateDelayStatus(travelMinutes: totalMins)
+                        self.refreshStopETAs() 
+                    }
+                }
+            } catch {
+                print("Apple Maps ETA error: \(error.localizedDescription)")
+            }
+            
+            await MainActor.run {
+                self.lastETARefresh = Date()
+            }
+        }
+    }
+    
+    /// High-precision roadway distance calculation (Sum of polyline segments)
+    /// Requirement: High-precision stop-by-stop ETA calculation
+    /// Uses polyline distance to distribute total Apple Maps time across all stops
+    func refreshStopETAs() {
         let busToTrack = selectedBusForDetail ?? bus
-        let currentIdx = Int(currentIndex)
+        let stopsSnapshot = displayedStops
+        guard stopsSnapshot.count >= 2, !fullRoutePath.isEmpty else { return }
         
-        let totalPoints = Double(fullRoutePath.count)
-        let totalStops = Double(max(1, displayedStops.count))
-        let targetPathIdx = Int(Double(index) * (totalPoints / totalStops))
+        // 1. Find bus's current position on the polyline
+        let busCoord = currentCoordinate
+        let busIdx = findClosestIndex(on: fullRoutePath, to: busCoord)
         
-        if targetPathIdx <= currentIdx { return 0 }
+        // 2. Identify the next stop
+        let nextStopIdx = busToTrack.currentStopIndex
+        guard nextStopIdx < stopsSnapshot.count else { return }
         
-        let pathSlice = fullRoutePath[currentIdx...min(targetPathIdx, fullRoutePath.count - 1)]
-        var totalDistMeters = 0.0
+        // 3. Get total destination time from existing estimation
+        guard let totalMins = appleMapsETAs["destination"] else { return }
         
-        if pathSlice.count >= 2 {
-            let coords = Array(pathSlice)
-            for i in 0..<coords.count - 1 {
-                let loc1 = CLLocation(latitude: coords[i].lat, longitude: coords[i].lon)
-                let loc2 = CLLocation(latitude: coords[i+1].lat, longitude: coords[i+1].lon)
-                totalDistMeters += loc1.distance(from: loc2)
+        // 4. Calculate Roadway Distance to Destination (Total)
+        let totalDistToDest = calculatePathDistance(fromIndex: busIdx, toIndex: fullRoutePath.count - 1)
+        guard totalDistToDest > 0 else { return }
+        
+        // 5. Update every upcoming stop
+        var cumulativeMins: Double = 0
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZZZZZ"
+
+        for i in nextStopIdx..<stopsSnapshot.count {
+            let stop = stopsSnapshot[i]
+            let stopIdxInPoly = findClosestIndex(on: fullRoutePath, to: stop.coordinate)
+            
+            // Road distance from bus to this specific stop
+            let distToStop = calculatePathDistance(fromIndex: busIdx, toIndex: stopIdxInPoly)
+            
+            // Proportional Time Calculation
+            let stopMinsRaw = (distToStop / totalDistToDest) * Double(totalMins)
+            
+            // Requirement 4: Ensure every subsequent stop is different
+            // FORCE PROGRESSION: Each stop must be at least 1-2 minutes apart
+            let finalMins = max(cumulativeMins + 1.0, stopMinsRaw)
+            cumulativeMins = finalMins
+            
+            let etaDate = Date().addingTimeInterval(TimeInterval(finalMins * 60))
+            let etaStr = df.string(from: etaDate)
+            
+            // Update the stop in the published array
+            if i < self.displayedStops.count {
+                self.displayedStops[i].realtimeEta = etaStr
+                
+                // Heuristic: Estimated Departure (ETD)
+                let dwellTime: Double = 45 // seconds
+                let etdDate = etaDate.addingTimeInterval(dwellTime)
+                self.displayedStops[i].realtimeDepartureEta = df.string(from: etdDate)
+                
+                // If this is the FIRST upcoming stop, update top cards
+                if i == nextStopIdx {
+                    let outDf = DateFormatter()
+                    outDf.dateFormat = "h:mm a"
+                    self.arrivalAtNextStop = outDf.string(from: etaDate)
+                    self.nextStopName = stop.name
+                }
             }
         }
         
-        let distKm = totalDistMeters / 1000.0
+        // Final card sync
+        self.estimatedTime = "\(totalMins) min"
+    }
+
+    private func calculatePathDistance(fromIndex: Int, toIndex: Int) -> Double {
+        guard !fullRoutePath.isEmpty else { return 0 }
+        let s = min(fromIndex, toIndex)
+        let e = max(fromIndex, toIndex)
+        if s == e { return 0 }
         
-        // Use live speed if available, otherwise fallback to average city speed
-        var speedInKmph = Double(busToTrack.liveTelemetry.speedKmph ?? 0)
-        if speedInKmph < 5.0 {
-            speedInKmph = 20.0 // Assume 20km/h average in traffic
+        var totalDist: Double = 0
+        for i in s..<e {
+            let p1 = fullRoutePath[i]
+            let p2 = fullRoutePath[i+1]
+            totalDist += haversineDistance(c1: p1, c2: p2)
+        }
+        return totalDist
+    }
+    
+    private func haversineDistance(c1: Coord, c2: Coord) -> Double {
+        let loc1 = CLLocation(latitude: c1.lat, longitude: c1.lon)
+        let loc2 = CLLocation(latitude: c2.lat, longitude: c2.lon)
+        return loc1.distance(from: loc2)
+    }
+
+    private func updateDelayStatus(travelMinutes: Int) {
+        let schedStr = scheduledArrivalTime ?? displayedStops.last?.timeText
+        guard let sStr = schedStr else {
+            self.delayStatus = "No Schedule"
+            return
         }
         
-        let hours = distKm / speedInKmph
-        let minutes = Int(hours * 60.0)
+        let df = DateFormatter()
+        df.dateFormat = sStr.contains("M") ? "h:mm a" : "HH:mm"
         
-        // Buffer for stops and traffic
-        let buffer = 1 
-        return max(1, minutes + buffer)
+        guard let schedDate = df.date(from: sStr) else { return }
+        
+        let calendar = Calendar.current
+        let now = Date()
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
+        let timeComponents = calendar.dateComponents([.hour, .minute], from: schedDate)
+        components.hour = timeComponents.hour
+        components.minute = timeComponents.minute
+        
+        guard let fullSchedDate = calendar.date(from: components) else { return }
+        
+        let projectedArrival = now.addingTimeInterval(TimeInterval(travelMinutes * 60))
+        let diffSecs = projectedArrival.timeIntervalSince(fullSchedDate)
+        let diffMins = Int(diffSecs / 60.0)
+        
+        if diffMins > 2 {
+            self.delayStatus = "\(diffMins) min delayed"
+        } else if diffMins < -2 {
+            self.delayStatus = "Early"
+        } else {
+            self.delayStatus = "On Time"
+        }
     }
 
     func formattedETATime(at index: Int) -> String {
@@ -689,31 +1010,315 @@ final class LiveTrackingViewModel: ObservableObject {
         return df.string(from: etaDate)
     }
     
-    var durationToDestination: Int {
+    var totalDurationToDestination: Int {
+        guard !displayedStops.isEmpty else { return 0 }
         return etaToStop(index: displayedStops.count - 1)
     }
     
-    private func updateNearestStopFallback() {
-        let busToTrack = selectedBusForDetail ?? bus
-        let currentCoord = (busToTrack.id == bus.id) ? currentCoordinate : (displayedStops.isEmpty ? currentCoordinate : displayedStops[min(busToTrack.currentStopIndex, displayedStops.count - 1)].coordinate)
+    func recalculateTwoColorPaths() {
+        guard !fullRoutePath.isEmpty else { return }
         
-        let sortedStops = displayedStops.sorted { s1, s2 in
-            let d1 = distance(currentCoord, s1.coordinate)
-            let d2 = distance(currentCoord, s2.coordinate)
-            return d1 < d2
-        }
+        let normalize = { (txt: String) in txt.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        let sName = normalize(sourceName)
+        let dName = normalize(destName)
         
-        if let nearest = sortedStops.first, distance(currentCoord, nearest.coordinate) < 0.005 {
-            if self.nearestStopName != nearest.name {
-                withAnimation { self.nearestStopName = nearest.name }
+        let sourceIdx: Int = {
+            if let c = sourceCoord, c.lat != 0 { return findClosestIndex(on: fullRoutePath, to: c) }
+            if !sName.isEmpty, let matchedIndex = bus.route.stops.firstIndex(where: { 
+                normalize($0.name).contains(sName) || sName.contains(normalize($0.name))
+            }) {
+                let matched = bus.route.stops[matchedIndex]
+                if matched.coordinate.lat != 0 { return findClosestIndex(on: fullRoutePath, to: matched.coordinate) }
+                let fraction = Double(matchedIndex) / Double(max(1, bus.route.stops.count - 1))
+                return min(fullRoutePath.count - 1, Int(fraction * Double(fullRoutePath.count - 1)))
+            }
+            if let first = displayedStops.first, first.coordinate.lat != 0 { return findClosestIndex(on: fullRoutePath, to: first.coordinate) }
+            return 0
+        }()
+        
+        let destIdx: Int = {
+            if let c = destinationCoord, c.lat != 0 { return findClosestIndex(on: fullRoutePath, to: c) }
+            if !dName.isEmpty, let matchedIndex = bus.route.stops.firstIndex(where: { 
+                normalize($0.name).contains(dName) || dName.contains(normalize($0.name))
+            }) {
+                let matched = bus.route.stops[matchedIndex]
+                if matched.coordinate.lat != 0 { return findClosestIndex(on: fullRoutePath, to: matched.coordinate) }
+                let fraction = Double(matchedIndex) / Double(max(1, bus.route.stops.count - 1))
+                return min(fullRoutePath.count - 1, Int(fraction * Double(fullRoutePath.count - 1)))
+            }
+            if let last = displayedStops.last, last.coordinate.lat != 0 { return findClosestIndex(on: fullRoutePath, to: last.coordinate) }
+            return fullRoutePath.count - 1
+        }()
+        
+        let start = min(sourceIdx, destIdx)
+        let end = max(sourceIdx, destIdx)
+        
+        withAnimation(.easeInOut) {
+            if start <= end && end < fullRoutePath.count {
+                self.tripPath = Array(fullRoutePath[start...end])
+            } else {
+                self.tripPath = fullRoutePath
+            }
+            
+            let busToTrack = selectedBusForDetail ?? bus
+            // Current position index
+            var currentV = currentCoordinate
+            if busToTrack.id != bus.id && !displayedStops.isEmpty {
+                currentV = displayedStops[min(max(0, busToTrack.currentStopIndex), displayedStops.count - 1)].coordinate
+            }
+            
+            let vIdx = findClosestIndex(on: fullRoutePath, to: currentV)
+            
+            // Pickup Path (Red/Orange): From live bus to the upcoming stop
+            // Requirement: Road-aware path (Apple Maps integrated)
+            if vIdx < start {
+                // Throttled roadway fetch
+                if shouldUpdateRoadwayPath() {
+                    fetchRoadwayPickupPath(from: currentV, to: fullRoutePath[start])
+                }
+                
+                // Fallback to polyline slice until Apple Maps returns
+                if pickupPath.isEmpty {
+                    self.pickupPath = Array(fullRoutePath[vIdx...start])
+                }
+                self.isApproachingSource = true
+            } else if vIdx == start {
+                self.pickupPath = [currentV]
+                self.isApproachingSource = true
+            } else {
+                self.pickupPath = [currentV, fullRoutePath[start]]
+                self.isApproachingSource = true
             }
         }
+    }
+    
+    private func shouldUpdateRoadwayPath() -> Bool {
+        if isFetchingDirections { return false }
+        guard let last = lastDirectionsUpdate else { return true }
+        // Throttle to 30 seconds
+        return Date().timeIntervalSince(last) > 30
+    }
+    
+    private func fetchRoadwayPickupPath(from: Coord, to: Coord) {
+        isFetchingDirections = true
+        let request = MKDirections.Request()
+        request.source = MKMapItem(location: CLLocation(latitude: from.lat, longitude: from.lon), address: nil)
+        request.destination = MKMapItem(location: CLLocation(latitude: to.lat, longitude: to.lon), address: nil)
+        request.transportType = .automobile
+        
+        Task {
+            do {
+                let response = try await MKDirections(request: request).calculate()
+                if let route = response.routes.first {
+                    let coords = route.polyline.coordinates
+                    await MainActor.run {
+                        self.pickupPath = coords.map { Coord(lat: $0.latitude, lon: $0.longitude) }
+                        self.lastDirectionsUpdate = Date()
+                        self.isFetchingDirections = false
+                    }
+                }
+            } catch {
+                print("MKDirections pickup path failed: \(error)")
+                await MainActor.run { self.isFetchingDirections = false }
+            }
+        }
+    }
+
+    private func handleGPSUpdate(lat: Double, lon: Double, speed: Double?, bearing: Double?, isFromWebSocket: Bool) {
+        guard lat != 0 && lon != 0 else { return }
+        
+        let newPoint = Coord(lat: lat, lon: lon)
+        
+        // 1. WebSocket Priority & Staleness Logic
+        // Increase cooling period to 30s. If we have live data, polling coordinates are strictly ignored.
+        if !isFromWebSocket && Date().timeIntervalSince(lastLiveUpdate) < 30 {
+            print("LiveTrackingViewModel: Ignoring polling update. WebSocket is active.")
+            return 
+        }
+        
+        if isFromWebSocket { 
+            self.lastLiveUpdate = Date() 
+        }
+
+        // 2. Movement Threshold & Monotonic Check
+        let dist = distance(self.currentCoordinate, newPoint)
+        
+        var snappedPoint = newPoint
+        var closestIdx = 0
+        
+        if !self.fullRoutePath.isEmpty {
+            closestIdx = self.findClosestIndex(on: self.fullRoutePath, to: newPoint)
+            snappedPoint = self.fullRoutePath[closestIdx]
+            
+            // MONOTONIC PROGRESS CHECK: 
+            // If the new coordinate moves the bus BACKWARDS on the route by more than 5 indices,
+            // it's almost certainly a stale update. Ignore it.
+            if self.currentIndex > 0 && Double(closestIdx) < (self.currentIndex - 5.0) {
+                print("LiveTrackingViewModel: Ignoring 'backwards' jump. (Current: \(self.currentIndex), New: \(closestIdx))")
+                return
+            }
+        }
+
+        // Jitter Suppression: Only update if moved > ~10 meters or if first update
+        if self.currentCoordinate.lat != 0 && dist < 0.0001 { return }
+
+        // 3. Update Position With Smooth Transition
+        withAnimation(.easeInOut(duration: 1.5)) {
+            self.currentCoordinate = snappedPoint
+            self.bus.currentCoordinate = snappedPoint
+            
+            if !self.fullRoutePath.isEmpty {
+                self.currentIndex = Double(closestIdx)
+                self.traveledPath = Array(self.fullRoutePath.prefix(closestIdx + 1))
+                self.remainingPath = Array(self.fullRoutePath[closestIdx...])
+                self.connectionToRoute = [newPoint, snappedPoint]
+            } else {
+                if self.traveledPath.isEmpty || distance(self.traveledPath.last ?? newPoint, newPoint) > 0.0001 {
+                    self.traveledPath.append(newPoint)
+                }
+            }
+            
+            self.bus.actualPolyline = self.traveledPath
+            self.isWaitingForGPS = false
+            
+            // 3.1 Synchronize Stop Telemetry using proximity-based stop advancement
+            if !self.bus.route.stops.isEmpty {
+                let newStopIdx = self.nearestForwardStopIndex(to: newPoint)
+                let prevIdx = self.bus.currentStopIndex
+                
+                // Only advance forward — never move backward
+                if newStopIdx > prevIdx {
+                    // Stamp actual arrival time on every newly passed stop
+                    let now = Date()
+                    let tf = DateFormatter()
+                    tf.dateFormat = "HH:mm"
+                    tf.timeZone = TimeZone(identifier: "Asia/Kolkata") ?? .current
+                    let nowStr = tf.string(from: now)
+                    
+                    for i in prevIdx..<min(newStopIdx, self.bus.route.stops.count) {
+                        self.bus.route.stops[i].realtimeEta = nowStr
+                        if let dIdx = self.displayedStops.firstIndex(where: { $0.id == self.bus.route.stops[i].id }) {
+                            self.displayedStops[dIdx].realtimeEta = nowStr
+                        }
+                    }
+                    self.bus.currentStopIndex = newStopIdx
+                }
+                
+                let currentIdx = self.bus.currentStopIndex
+                if currentIdx < self.bus.route.stops.count {
+                    self.nearestStopName = self.bus.route.stops[currentIdx].name
+                }
+                if currentIdx + 1 < self.bus.route.stops.count {
+                    let nextStop = self.bus.route.stops[currentIdx + 1]
+                    self.nextStopName = nextStop.name
+                    self.arrivalAtNextStop = nextStop.scheduledArrival.flatMap { s in
+                        // Show scheduled time for next stop from DB
+                        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
+                        f.timeZone = TimeZone(identifier: "Asia/Kolkata") ?? .current
+                        if let d = f.date(from: s) {
+                            let out = DateFormatter(); out.dateFormat = "HH:mm"; out.timeZone = f.timeZone
+                            return out.string(from: d)
+                        }
+                        return String(s.prefix(5))
+                    } ?? nextStop.displayTime(isRunning: self.bus.isRunning) ?? "--:--"
+                } else {
+                    self.nextStopName = "Arrived"
+                    self.arrivalAtNextStop = "--:--"
+                }
+                
+                self.recalculateDisplayedStops()
+            }
+        }
+
+        // 4. Update Telemetry
+        self.bus.liveTelemetry.speed = speed ?? 0
+        self.bus.liveTelemetry.bearing = bearing ?? 0
+        self.bus.liveTelemetry.speedKmph = Int((speed ?? 0) * 1.60934)
+        self.bus.liveTelemetry.lastUpdate = Date()
+        
+        // 5. Trigger sub-state refreshes
+        self.tick()
+    }
+
+    private func findClosestIndex(on path: [Coord], to target: Coord) -> Int {
+        var closestIdx = 0
+        var minDistance = Double.infinity
+        
+        for (idx, coord) in path.enumerated() {
+            let d = distance(coord, target)
+            if d < minDistance {
+                minDistance = d
+                closestIdx = idx
+            }
+        }
+        return closestIdx
     }
     
     private func distance(_ c1: Coord, _ c2: Coord) -> Double {
         let dLat = c1.lat - c2.lat
         let dLon = c1.lon - c2.lon
         return sqrt(dLat * dLat + dLon * dLon)
+    }
+
+    private func nearestForwardStopIndex(to point: Coord) -> Int {
+        let fullStops = bus.route.stops
+        guard !fullStops.isEmpty else { return 0 }
+        let currentIdx = bus.currentStopIndex
+        
+        // Search from current stop to the end to find the closest one
+        var bestIdx = currentIdx
+        if currentIdx >= fullStops.count { return bestIdx }
+        var minStopDist = distance(point, fullStops[currentIdx].coordinate)
+        
+        // Threshold for auto-arriving: 0.002 degrees (~200 meters)
+        let arrivalThreshold = 0.002 
+        
+        for i in currentIdx..<fullStops.count {
+            if fullStops[i].coordinate.lat == 0 { continue }
+            let d = distance(point, fullStops[i].coordinate)
+            
+            // If we are significantly close to a future stop, we've arrived there
+            if d < arrivalThreshold {
+                return i
+            }
+            
+            // Keep track of the mathematically closest stop ahead of us
+            if d < minStopDist {
+                minStopDist = d
+                bestIdx = i
+            }
+        }
+        
+        return bestIdx
+    }
+    
+    private func recalculateDisplayedStops() {
+        guard !bus.route.stops.isEmpty else { return }
+        var displayStops = bus.route.stops
+        
+        let normalize = { (s: String) in s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        
+        if let source = self.sourceStop, let destination = self.destinationStop {
+             let srcIdx = bus.route.stops.firstIndex(where: { normalize($0.name).contains(normalize(source)) || normalize(source).contains(normalize($0.name)) }) ?? 0
+             let dstIdx = bus.route.stops.firstIndex(where: { normalize($0.name).contains(normalize(destination)) || normalize(destination).contains(normalize($0.name)) }) ?? (bus.route.stops.count - 1)
+             
+             let startIdx = min(self.bus.currentStopIndex, srcIdx)
+             let endIdx = max(srcIdx, dstIdx)
+             
+             if startIdx <= endIdx && endIdx < bus.route.stops.count {
+                 displayStops = Array(bus.route.stops[startIdx...endIdx])
+             }
+        } else if let source = self.sourceStop {
+             let srcIdx = bus.route.stops.firstIndex(where: { normalize($0.name).contains(normalize(source)) || normalize(source).contains(normalize($0.name)) }) ?? 0
+             let startIdx = min(self.bus.currentStopIndex, srcIdx)
+             if startIdx < bus.route.stops.count {
+                 displayStops = Array(bus.route.stops[startIdx...])
+             }
+        }
+        
+        if self.displayedStops.map({$0.id}) != displayStops.map({$0.id}) {
+             self.displayedStops = displayStops
+        }
     }
 
     private var fastPollingTick: Int = 0
@@ -726,6 +1331,18 @@ final class LiveTrackingViewModel: ObservableObject {
                 
                 await MainActor.run {
                     BusRepository.shared.updateBusTelemetry(id: self.bus.id, point: point, speed: spd, timestampRaw: ts)
+                    
+                    // Route through central handler instead of manual property set
+                    self.handleGPSUpdate(lat: point.lat, lon: point.lon, speed: spd, bearing: nil, isFromWebSocket: false)
+                    
+                    if let startStr = self.displayedStops.first?.scheduledArrival, 
+                       let startDate = self.parseTimeToday(startStr) {
+                        self.durationTakenMinutes = Int(Date().timeIntervalSince(startDate) / 60)
+                        if self.durationTakenMinutes < 0 { self.durationTakenMinutes = 0 }
+                    }
+                    
+                    self.recalculateTwoColorPaths()
+                    self.refreshAppleMapsETAs()
                     print("syncActiveBusCoord [\(bus.number)]: Telemetry updated in repository")
                 }
             } else {

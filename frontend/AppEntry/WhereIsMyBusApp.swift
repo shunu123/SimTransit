@@ -21,7 +21,6 @@ struct WhereIsMyBusApp: App {
     var body: some Scene {
         WindowGroup {
             ZStack {
-                // Gate between Login and Main App
                 if session.isLoggedIn {
                     // Main Content
                     RouteShellView()

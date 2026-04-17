@@ -356,7 +356,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "WhereIsMyBus-Info.plist";
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "We need location in background to track the bus";
+				INFOPLIST_KEY_NSLocationUsageDescription = "";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We need your location to show the bus on the map";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use your microphone to capture your voice for bus searches.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "We use speech recognition to allow you to search for buses by voice.";
@@ -395,7 +397,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "WhereIsMyBus-Info.plist";
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "We need location in background to track the bus";
+				INFOPLIST_KEY_NSLocationUsageDescription = "";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We need your location to show the bus on the map";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use your microphone to capture your voice for bus searches.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "We use speech recognition to allow you to search for buses by voice.";

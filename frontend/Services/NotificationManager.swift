@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import UserNotifications
 import AVFoundation
+@MainActor
 class NotificationManager: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationManager()
     
@@ -57,7 +58,7 @@ class NotificationManager: NSObject, ObservableObject, UNUserNotificationCenterD
     }
     
     // Allows notification to show even when app is in foreground
-    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound, .badge])
     }
 }

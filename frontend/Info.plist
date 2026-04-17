@@ -12,6 +12,8 @@
     <string>We need your location to track the bus and transmit live GPS updates to other users.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>We need your location to track the bus and transmit live GPS updates to other users.</string>
+    <key>NSLocationUsageDescription</key>
+    <string>Your location is used to show your progress and distance to stops on the live tracking map.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>We need speech recognition to allow you to search for buses using your voice.</string>
     <key>NSMicrophoneUsageDescription</key>

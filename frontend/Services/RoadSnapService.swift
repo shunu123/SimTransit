@@ -28,8 +28,8 @@ actor RoadSnapService {
             let request = MKDirections.Request()
             let startLocation = CLLocationCoordinate2D(latitude: start.lat, longitude: start.lon)
             let endLocation   = CLLocationCoordinate2D(latitude: end.lat,   longitude: end.lon)
-            request.source      = MKMapItem(placemark: MKPlacemark(coordinate: startLocation))
-            request.destination = MKMapItem(placemark: MKPlacemark(coordinate: endLocation))
+            request.source      = MKMapItem(location: CLLocation(latitude: startLocation.latitude, longitude: startLocation.longitude), address: nil)
+            request.destination = MKMapItem(location: CLLocation(latitude: endLocation.latitude, longitude: endLocation.longitude), address: nil)
             request.transportType = .automobile
 
             do {
@@ -37,7 +37,7 @@ actor RoadSnapService {
                 if let route = response.routes.first {
                     let pts   = route.polyline.points()
                     let count = route.polyline.pointCount
-                    let skip  = max(1, count / 80)
+                    let skip  = max(1, count / 150) // Increased density from 80 to 150
                     for j in stride(from: 0, to: count, by: skip) {
                         let coord = pts[j].coordinate
                         allPoints.append(Coord(lat: coord.latitude, lon: coord.longitude))

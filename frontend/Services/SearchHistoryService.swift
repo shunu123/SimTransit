@@ -1,9 +1,16 @@
 import Foundation
 
 /// Persists and retrieves search history (from/to pairs) using UserDefaults.
+@MainActor
 final class SearchHistoryService {
     static let shared = SearchHistoryService()
-    private let key = "search_history"
+    private var key: String {
+        if let uid = SessionManager.shared.currentUser?.id {
+            return "search_history_\(uid)"
+        }
+        return "search_history_guest"
+    }
+
     private let maxItems = 5
 
     private init() {}
@@ -39,7 +46,7 @@ final class SearchHistoryService {
         encode(current)
     }
 
-    /// Clear all history.
+    /// Clear all history for the current user.
     func clearAll() {
         UserDefaults.standard.removeObject(forKey: key)
     }

@@ -6,8 +6,7 @@ struct RouteShellView: View {
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var theme: ThemeManager
     @EnvironmentObject var locationManager: LocationManager
-
-    @State private var isDrawerOpen = false
+    @State private var isDrawerOpen: Bool = false
 
     var body: some View {
         ZStack {
@@ -18,20 +17,14 @@ struct RouteShellView: View {
                         destination(for: route)
                     }
             }
-
-            // Backdrop
+            
+            // Drawer Overlay
             if isDrawerOpen {
-                Color.black.opacity(0.4)
-                    .ignoresSafeArea()
-                    .onTapGesture { withAnimation { isDrawerOpen = false } }
-                    .zIndex(1)
-
                 DrawerView(isOpen: $isDrawerOpen)
-                    .zIndex(2)
                     .transition(.move(edge: .leading))
+                    .zIndex(100)
             }
         }
-        .animation(.easeInOut(duration: 0.28), value: isDrawerOpen)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToBusSchedule"))) { notification in
             if let busID = notification.object as? String {
                 router.go(.busSchedule(busID: busID))
@@ -116,7 +109,7 @@ struct RouteShellView: View {
         case .logout:
             LoginView()
 
-        case .routeMap(let busNumbers, let from, let to):
+        case .routeMap(_, let from, let to):
             // Fallback since bus objects were removed from navigation temporarily
             RouteMapView(buses: [], fromStop: from, toStop: to)
 
@@ -130,7 +123,7 @@ struct RouteShellView: View {
         case .allRoutes:
             AllRoutesView()
 
-        case .routeDetail(let routeID):
+        case .routeDetail(_):
             // Fallback since route object was removed from navigation temporarily
             unavailableView("Route detail unavailable")
 
@@ -153,6 +146,8 @@ struct RouteShellView: View {
         case .adminHistory:
             AdminHistoryView()
         case .studentDashboard:
+            StudentDashboardView()
+        case .nearbyStops:
             StudentDashboardView()
         }
     }

@@ -124,9 +124,11 @@ struct AvailableBusesView: View {
                         from: origin,
                         to: destination,
                         onSelectBus: { bus in
-                            router.go(.busSchedule(
-                                busID: bus.id.uuidString, 
-                                searchPoint: origin, 
+                            router.go(.liveTracking(
+                                busID: bus.id, 
+                                isHistorical: false, 
+                                date: Date(), 
+                                sourceStop: origin, 
                                 destinationStop: destination,
                                 sourceLat: fromCoord?.latitude,
                                 sourceLon: fromCoord?.longitude,
@@ -192,9 +194,11 @@ struct AvailableBusesView: View {
                             .background(Circle().fill(theme.current.accent))
                             .shadow(radius: 2)
                             .onTapGesture {
-                                router.go(.busSchedule(
-                                    busID: bus.id.uuidString,
-                                    searchPoint: origin,
+                                router.go(.liveTracking(
+                                    busID: bus.id,
+                                    isHistorical: false,
+                                    date: Date(),
+                                    sourceStop: origin,
                                     destinationStop: destination,
                                     sourceLat: fromCoord?.latitude,
                                     sourceLon: fromCoord?.longitude,

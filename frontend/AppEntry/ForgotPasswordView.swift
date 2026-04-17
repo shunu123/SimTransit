@@ -224,7 +224,7 @@ struct ForgotPasswordView: View {
             }
             do {
                 let targetToReset = resolvedTarget.isEmpty ? emailOrRegNo : resolvedTarget
-                try await APIService.shared.resetPassword(email: targetToReset, newPassword: newPassword)
+                try await APIService.shared.resetPassword(phone: targetToReset, newPin: newPassword)
                 step = .done
             } catch {
                 alertMessage = error.localizedDescription

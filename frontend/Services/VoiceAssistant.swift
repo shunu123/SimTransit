@@ -21,6 +21,22 @@ final class VoiceAssistant: ObservableObject {
     private var silenceTimer: Timer?
     var onSilenceRecognized: (() -> Void)?
 
+    init() {
+        setupInterruptionHandling()
+    }
+
+    private func setupInterruptionHandling() {
+        #if os(iOS)
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            self?.stop()
+        }
+        #endif
+    }
+
     func speak(text: String) {
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
@@ -55,29 +71,48 @@ final class VoiceAssistant: ObservableObject {
             return 
         }
 
+        #if os(iOS)
         let session = AVAudioSession.sharedInstance()
+        guard session.recordPermission == .granted else {
+            print("VoiceAssistant: Microphone permission not granted.")
+            isListening = false
+            return
+        }
+        
         do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try session.setActive(true, options: .notifyOthersOnDeactivation)
         } catch { 
+            print("VoiceAssistant: Audio session error: \(error)")
             isListening = false
             return 
         }
+        #endif
 
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
         request = req
 
+        // SAFE ACCESS TO Audio Engine
         let input = audioEngine.inputNode
         let format = input.outputFormat(forBus: 0)
+        
+        guard format.sampleRate > 0 else {
+            print("VoiceAssistant: Invalid audio format (rate is 0). Audio hardware might be busy.")
+            stop()
+            return
+        }
+        
+        // Ensure clean state before starting
         input.removeTap(onBus: 0)
         
         var lastUpdate = Date().timeIntervalSince1970
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            req.append(buffer)
+            guard let self = self, self.isListening, let currentRequest = self.request else { return }
+            currentRequest.append(buffer)
             
             // Calculate audio level (RMS)
-            guard let self, let channelData = buffer.floatChannelData?[0] else { return }
+            guard let channelData = buffer.floatChannelData?[0] else { return }
             let frames = Int(buffer.frameLength)
             var sum: Float = 0
             for i in 0..<frames {
@@ -100,7 +135,8 @@ final class VoiceAssistant: ObservableObject {
         do {
             try audioEngine.start()
         } catch { 
-            isListening = false
+            print("VoiceAssistant: Audio engine start error: \(error)")
+            stop()
             return 
         }
 
@@ -108,13 +144,20 @@ final class VoiceAssistant: ObservableObject {
         restartSilenceTimer()
 
         task = recognizer?.recognitionTask(with: req) { [weak self] result, error in
-            guard let self else { return }
-            if let r = result {
-                self.transcript = r.bestTranscription.formattedString
-                self.restartSilenceTimer()
-            }
-            if error != nil {
-                self.stop()
+            guard let self = self else { return }
+            
+            Task { @MainActor in
+                if let r = result {
+                    self.transcript = r.bestTranscription.formattedString
+                    self.restartSilenceTimer()
+                }
+                
+                if error != nil || result?.isFinal == true {
+                    self.stop()
+                    if error != nil {
+                        print("VoiceAssistant: Task error: \(error!)")
+                    }
+                }
             }
         }
     }
@@ -136,8 +179,11 @@ final class VoiceAssistant: ObservableObject {
         isListening = false
         silenceTimer?.invalidate()
 
-        audioEngine.stop()
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
         audioEngine.inputNode.removeTap(onBus: 0)
+        audioEngine.reset()
 
         request?.endAudio()
         request = nil
@@ -145,6 +191,10 @@ final class VoiceAssistant: ObservableObject {
         task?.cancel()
         task = nil
 
+        #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
+        
+        print("VoiceAssistant: Listening stopped.")
     }
 }

@@ -2,16 +2,24 @@ import Foundation
 
 enum APIConfig {
 
-    /// 🌐 OPTION 1: GLOBAL ACCESS via loca.lt tunnel
-    /// Run: lt --port 8000 --subdomain fast-numbers-beam
-    /// The bypass-tunnel-reminder header is automatically added by APIService for all requests.
-    static let publicURL = "https://fast-numbers-beam.loca.lt"
+    /// 🌐 OPTION 1: GLOBAL ACCESS via ngrok tunnel
+    static let publicURL = "https://elmier-kristin-cheerly.ngrok-free.dev"
 
     /// 📶 OPTION 2: SAME Wi-Fi ACCESS (Mac + iPhone on same network — no tunnel needed)
     static let localHostName = "http://bujjuus-MacBook-Air.local:8000"
 
     /// 🛠️ OPTION 3: Simulator only
     static let localIP = "http://127.0.0.1:8000"
+
+    /// ☁️ OPTION 4: ngrok Tunnel (Live)
+    static let ngrokURL = "https://elmier-kristin-cheerly.ngrok-free.dev"
+
+    /// 📶 GPS LOGGER / TRACCAR SETUP
+    /// To track a bus live from your phone:
+    /// 1. Install "Traccar Client" (iOS/Android) or "GPS Logger" (Android)
+    /// 2. Set 'Server URL' to: [BASE_URL]/api/gps/traccar
+    /// 3. Add parameters: id=BUS1 (or any bus name)
+    /// Full Template: [BASE_URL]/api/gps/traccar?id=BUS1&lat=%lat&lon=%lon&spd=%speed&hdg=%bearing
 
     /// 🚀 THE FINAL URL THE APP USES
     static var baseURL: String {

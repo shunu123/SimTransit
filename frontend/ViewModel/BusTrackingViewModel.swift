@@ -24,9 +24,11 @@ class BusTrackingViewModel: ObservableObject {
         do {
             // Support both internal (INT) and external (STRING) IDs
             if let intId = Int(tripId) {
-                self.schedule = try await APIService.shared.fetchTimeline(tripId: intId)
+                let result = try await APIService.shared.fetchTimeline(tripId: intId)
+                self.schedule = result.stops
             } else {
-                self.schedule = try await APIService.shared.fetchTimeline(extTripId: tripId)
+                let result = try await APIService.shared.fetchTimeline(extTripId: tripId)
+                self.schedule = result.stops
             }
         } catch {
             print("Schedule Fetch Error: \(error)")

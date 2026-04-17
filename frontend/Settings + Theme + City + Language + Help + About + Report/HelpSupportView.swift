@@ -191,8 +191,9 @@ struct HelpSupportView: View {
         Task {
             do {
                 try await APIService.shared.postContact(
-                    email: SessionManager.shared.currentUser?.email,
-                    subject: "General Support Request",
+                    name: SessionManager.shared.currentUser?.first_name ?? "User",
+                    email: SessionManager.shared.currentUser?.email ?? "No Email",
+                    subject: "Help & Support Message",
                     message: message
                 )
                 withAnimation { showingMailSuccess = true }

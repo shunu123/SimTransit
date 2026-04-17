@@ -16,7 +16,7 @@ struct FleetHistoryView: View {
     @State private var isSheetExpanded = false
     
     @State private var mapRegion: MKCoordinateRegion = MKCoordinateRegion(
-        center: LocationManager.shared.userLocation?.coordinate ?? CLLocationCoordinate2D(latitude: 13.0475, longitude: 80.1167),
+        center: LocationManager.shared.userLocation?.coordinate ?? CLLocationCoordinate2D(latitude: 0, longitude: 0),
         span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
     )
 
@@ -306,7 +306,7 @@ private extension FleetHistoryView {
     // MARK: Map View
     var mapView: some View {
         Map(position: .constant(.region(mapRegion))) {
-            // Destination
+            // Destination (Dynamic from ViewModel)
             Annotation(vm.destinationName, coordinate: vm.destinationHub.cl) {
                 VStack(spacing: 2) {
                     Image(systemName: "building.2.crop.circle.fill")
@@ -314,7 +314,7 @@ private extension FleetHistoryView {
                         .foregroundStyle(.white, theme.current.accent)
                         .background(Circle().fill(.white))
                     
-                    Text("Saveetha")
+                    Text(vm.destinationName)
                         .font(.caption2.bold())
                         .foregroundColor(.black)
                         .padding(.horizontal, 6)

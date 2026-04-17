@@ -3,19 +3,18 @@ import CoreLocation
 import Combine
 import MapKit
 
+@MainActor
 class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     static let shared = LocationManager()
     private let manager = CLLocationManager()
     
     @Published var userLocation: CLLocation?
-    @Published var currentAddress = "Fetching location..."
-    @Published var currentCity = "Chennai"
+    @Published var currentAddress = "Locating..."
+    @Published var currentCity = ""
     
     private var isUpdatingAddress = false
     
-    private let cityCoordinates: [String: CLLocation] = [
-        "Chennai": CLLocation(latitude: 13.0827, longitude: 80.2707)
-    ]
+    private let cityCoordinates: [String: CLLocation] = [:]
     
     override init() {
         super.init()
@@ -25,9 +24,9 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
         manager.requestWhenInUseAuthorization()
         manager.startUpdatingLocation()
         
-        // Initial fallback
-        userLocation = cityCoordinates["Chennai"]
-        currentAddress = "Chennai, Tamil Nadu"
+        // No initial fallback coordinate — wait for real sensor data
+        userLocation = nil
+        currentAddress = "Locating..."
     }
     
     func setCity(_ name: String) {
@@ -61,8 +60,8 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
             self?.isUpdatingAddress = false
             
             if let mapItem = response?.mapItems.first {
-                let city = mapItem.name ?? "Chennai"
-                let address = mapItem.name ?? city // In iOS 26, name/address are preferred
+                let city = mapItem.name ?? ""
+                let address = mapItem.name ?? "Current Location"
                 
                 DispatchQueue.main.async {
                     self?.currentCity = city

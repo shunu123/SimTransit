@@ -40,18 +40,21 @@ struct HomeView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(spacing: 24) {
                         // Track by Bus Number bar
-                        trackByNumberBar
-                            .padding(.horizontal, 20)
-                            .padding(.top, 25) // Increased padding to clear search card shadow
+                        VStack(spacing: 12) {
+                            trackByNumberBar
+                            nearbyStopsBar
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 25) 
                         
                         // 1. Recent Buses (Priority)
                         recentBusesSection
                             .padding(.top, 10)
-                            .padding(.horizontal, 20)
+                            .padding(.horizontal, 16)
                         
                         // 2. Recent Route Searches (Secondary)
                         recentRoutesSection
-                            .padding(.horizontal, 20)
+                            .padding(.horizontal, 16)
                         
                         if vm.isHistoryMode && SessionManager.shared.userRole == "admin" {
                             // History Date Selection
@@ -61,7 +64,7 @@ struct HomeView: View {
                                 .padding()
                                 .background(theme.current.card)
                                 .cornerRadius(12)
-                                .padding(.horizontal, 20)
+                                .padding(.horizontal, 16)
                         }
                     }
                     .padding(.bottom, SessionManager.shared.userRole == "admin" ? 60 : 20) // Buffer for bottom bar
@@ -94,6 +97,7 @@ struct HomeView: View {
             vm.router = router
             vm.checkPermissions()
             vm.loadRecentSearches()
+            vm.clearManualSearch()
             SessionManager.shared.resetIdleTimer()
             
             // Dynamic Header (Static)
@@ -124,12 +128,34 @@ struct HomeView: View {
                 }
                 .transition(.opacity)
             }
+            
+            // Voice Listening Overlay
+            if vm.isListening {
+                ListeningAnimationView(transcript: vm.transcript)
+                    .contentShape(Rectangle())
+                    .transition(.opacity)
+                    .zIndex(200)
+                    .onTapGesture {
+                        withAnimation {
+                            vm.voice.stop()
+                            vm.processVoiceCommand()
+                        }
+                    }
+            }
         }
         .ignoresSafeArea(.all, edges: .top)
 
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showingManualSearch) {
             manualSearchSheet
+                .onAppear { vm.clearManualSearch() }
+        }
+        .alert("Search Error", isPresented: Binding(get: { vm.errorMessage != nil }, set: { if !$0 { vm.errorMessage = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            if let msg = vm.errorMessage {
+                Text(msg)
+            }
         }
     }
 
@@ -206,7 +232,6 @@ private extension HomeView {
 
     private func handleManualSearch() {
         let search = vm.busNumberSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        
         let allBuses = BusRepository.shared.allBuses
         
         // 1. Exact match in repository
@@ -218,29 +243,25 @@ private extension HomeView {
         }) {
             BusSearchHistoryService.shared.save(bus.number)
             vm.loadRecentSearches()
-            router.go(.busSchedule(busID: bus.id.uuidString, searchPoint: nil, destinationStop: nil))
+            router.go(.liveTracking(busID: bus.id, isHistorical: vm.isHistoryMode, date: vm.isHistoryMode ? vm.historyDate : Date()))
             showingManualSearch = false
             return
         }
-        
-        // 2. Fuzzy match in repository
+
+        // 2. Last chance: Fuzzy match in repository
         if let fuzzyBus = allBuses.first(where: {
             $0.number.lowercased().contains(search) ||
-            ($0.extTripId?.lowercased().contains(search) ?? false) ||
-            ($0.statusDetail?.lowercased().contains(search) ?? false)
+            ($0.extTripId?.lowercased().contains(search) ?? false)
         }) {
             BusSearchHistoryService.shared.save(fuzzyBus.number)
             vm.loadRecentSearches()
-            router.go(.busSchedule(busID: fuzzyBus.id.uuidString, searchPoint: nil, destinationStop: nil))
+            router.go(.liveTracking(busID: fuzzyBus.id, isHistorical: vm.isHistoryMode, date: vm.isHistoryMode ? vm.historyDate : Date()))
             showingManualSearch = false
             return
         }
         
-        // 3. Fallback: Treat as a Route ID
-        let routeNum = search.uppercased()
-        BusSearchHistoryService.shared.save(routeNum)
-        vm.loadRecentSearches()
-        router.go(.availableBuses(from: "Route \(routeNum)", to: "Destination", fromLat: nil, fromLon: nil, toLat: nil, toLon: nil, via: routeNum))
+        // NO FALLBACK - Database only
+        vm.errorMessage = "Bus number '\(search.uppercased())' not found in database."
         showingManualSearch = false
     }
 
@@ -282,30 +303,21 @@ private extension HomeView {
             
             // Content
             ZStack {
-                // Centered Title or Voice Wave or Greeting
-                Group {
-                    if vm.voice.isListening {
-                        VoiceWaveView(level: vm.voice.audioLevel)
-                            .frame(height: 40)
-                            .transition(.opacity)
-                    } else {
-                        VStack(spacing: 2) {
-                            Text("Where Is My Bus?")
-                                .font(.system(size: 20, weight: .black, design: .rounded))
-                                .foregroundStyle(.white)
-                            
-                            HStack(spacing: 4) {
-                                Image(systemName: "mappin.circle.fill")
-                                    .font(.caption2)
-                                Text(locationManager.currentAddress)
-                                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                            }
-                            .foregroundStyle(.white.opacity(0.8))
-                        }
+                // Centered Title
+                VStack(spacing: 2) {
+                    Text("Where Is My Bus?")
+                        .font(.system(size: 20, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                    
+                    HStack(spacing: 4) {
+                        Image(systemName: "mappin.circle.fill")
+                            .font(.caption2)
+                        Text(locationManager.currentAddress)
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
                     }
+                    .foregroundStyle(.white.opacity(0.8))
                 }
                 .frame(maxWidth: .infinity)
-                .animation(.easeInOut(duration: 0.5), value: vm.voice.isListening)
 
                 // Left Action (Drawer)
                 HStack {
@@ -326,9 +338,11 @@ private extension HomeView {
                     // Voice Mic
                     Button {
                         if vm.isSpeechAuthorized {
-                            if vm.voice.isListening {
-                                vm.voice.stop()
-                                vm.processVoiceCommand()
+                            if vm.isListening {
+                                withAnimation {
+                                    vm.voice.stop()
+                                    vm.processVoiceCommand()
+                                }
                             } else {
                                 Task { await vm.voice.start() }
                             }
@@ -338,7 +352,7 @@ private extension HomeView {
                             }
                         }
                     } label: {
-                        Image(systemName: vm.voice.isListening ? "stop.fill" : "mic.fill")
+                        Image(systemName: vm.isListening ? "stop.fill" : "mic.fill")
                             .font(.title2.weight(.bold))
                             .foregroundStyle(.white)
                             .opacity(vm.isSpeechAuthorized ? 1.0 : 0.6)
@@ -352,41 +366,12 @@ private extension HomeView {
     }
 }
 
-struct VoiceWaveView: View {
-    var level: Float
-    
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<15, id: \.self) { i in
-                // Slippery wave effect with overlapping sine waves
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(.white)
-                    .frame(width: 3, height: calculateHeight(for: i))
-                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: level)
-            }
-        }
-    }
-    
-    private func calculateHeight(for index: Int) -> CGFloat {
-        let baseHeight: CGFloat = 8
-        let intensity = CGFloat(level) * 100
-        let time = Date().timeIntervalSince1970
-        
-        // Overlapping sine waves for a "slippery" feel
-        let wave1 = sin(time * 5 + Double(index) * 0.4) * intensity * 0.5
-        let wave2 = cos(time * 3 + Double(index) * 0.7) * intensity * 0.3
-        
-        return max(baseHeight, baseHeight + wave1 + wave2)
-    }
-}
-
 // MARK: - Components overhaul
 private extension HomeView {
-    var mainSearchCard: some View {
+    private var mainSearchCard: some View {
         VStack(spacing: 0) {
             searchCardHeader
             searchButton
-            browseAllRoutesButton
         }
         .background(theme.current.card)
         .cornerRadius(16)
@@ -504,18 +489,27 @@ private extension HomeView {
 
     @ViewBuilder
     private var suggestionsOverlay: some View {
-        if (!vm.fromSuggestions.isEmpty && focusedField == .from) || (!vm.toSuggestions.isEmpty && focusedField == .to) {
+        if (focusedField == .from && (vm.isSearchingFrom || !vm.fromSuggestions.isEmpty || vm.fromText.count >= 3)) ||
+           (focusedField == .to && (vm.isSearchingTo || !vm.toSuggestions.isEmpty || vm.toText.count >= 3)) {
             ScrollView {
                 VStack(spacing: 0) {
-                    if !vm.fromSuggestions.isEmpty && focusedField == .from {
-                        suggestionList(suggestions: vm.fromSuggestions) { stop in
-                            vm.selectFrom(stop)
-                            focusedField = nil
+                    if focusedField == .from {
+                        if !vm.fromSuggestions.isEmpty {
+                            suggestionList(suggestions: vm.fromSuggestions) { stop in
+                                vm.selectFrom(stop)
+                                focusedField = nil
+                            }
+                        } else if !vm.isSearchingFrom && vm.fromText.count >= 3 {
+                            noResultsRow(for: vm.fromText)
                         }
-                    } else if !vm.toSuggestions.isEmpty && focusedField == .to {
-                        suggestionList(suggestions: vm.toSuggestions) { stop in
-                            vm.selectTo(stop)
-                            focusedField = nil
+                    } else if focusedField == .to {
+                        if !vm.toSuggestions.isEmpty {
+                            suggestionList(suggestions: vm.toSuggestions) { stop in
+                                vm.selectTo(stop)
+                                focusedField = nil
+                            }
+                        } else if !vm.isSearchingTo && vm.toText.count >= 3 {
+                            noResultsRow(for: vm.toText)
                         }
                     }
                 }
@@ -528,6 +522,19 @@ private extension HomeView {
             .shadow(color: Color.black.opacity(0.15), radius: 15, x: 0, y: 8)
             .zIndex(500)
         }
+    }
+
+    private func noResultsRow(for query: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.magnifyingglass")
+                .foregroundStyle(.red)
+            Text("No results matching \"\(query)\"")
+                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .foregroundStyle(theme.current.secondaryText)
+            Spacer()
+        }
+        .padding(16)
+        .background(theme.current.card)
     }
     
     @ViewBuilder
@@ -581,23 +588,34 @@ private extension HomeView {
     
     private func handleSearch() {
         guard !vm.fromText.isEmpty, !vm.toText.isEmpty else { return }
-        // Save history locally
-        SearchHistoryService.shared.save(from: vm.fromText, to: vm.toText)
-        
-        // Save history to backend
-        let fid = vm.fromID ?? ""
-        let tid = vm.toID ?? ""
-        let fn = vm.fromText
-        let tn = vm.toText
-        let uid = SessionManager.shared.currentUser?.id
-        
-        let fLat = vm.fromStop?.lat
-        let fLon = vm.fromStop?.lng
-        let tLat = vm.toStop?.lat
-        let tLon = vm.toStop?.lng
         
         Task {
             vm.isLoading = true
+            
+            // Re-validate against database in case user typed but didn't select
+            let isValid = await vm.validateStopsBeforeSearch()
+            
+            if !isValid {
+                vm.isLoading = false
+                vm.errorMessage = "Please select a valid stop from the suggestions list."
+                return
+            }
+            
+            // Save history locally
+            SearchHistoryService.shared.save(from: vm.fromText, to: vm.toText)
+            
+            // Save history to backend
+            let fid = vm.fromID ?? ""
+            let tid = vm.toID ?? ""
+            let fn = vm.fromText
+            let tn = vm.toText
+            let uid = SessionManager.shared.currentUser?.id
+            
+            let fLat = vm.fromStop?.lat
+            let fLon = vm.fromStop?.lng
+            let tLat = vm.toStop?.lat
+            let tLon = vm.toStop?.lng
+            
             try? await APIService.shared.saveRecentSearch(
                 fromStopId: fid.isEmpty ? "unknown" : fid,
                 toStopId: tid.isEmpty ? "unknown" : tid,
@@ -757,7 +775,7 @@ private extension HomeView {
         if let bus = BusRepository.shared.allBuses.first(where: { $0.number.lowercased() == number.lowercased() }) {
             BusSearchHistoryService.shared.save(number)
             vm.loadRecentSearches()
-            router.go(.busSchedule(busID: bus.id.uuidString, searchPoint: nil, destinationStop: nil))
+            router.go(.liveTracking(busID: bus.id, isHistorical: false, date: Date()))
         }
     }
 
@@ -858,6 +876,40 @@ private extension HomeView {
 
 
 
+    var nearbyStopsBar: some View {
+        Button {
+            router.go(.nearbyStops)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "location.north.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(theme.current.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Nearby Bus Stops")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(theme.current.text)
+                    Text("Find the closest station to you")
+                        .font(.caption)
+                        .foregroundStyle(theme.current.secondaryText)
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .foregroundStyle(theme.current.secondaryText)
+            }
+            .padding(12)
+            .background(theme.current.card)
+            .cornerRadius(16)
+            .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: 5)
+        }
+    }
+
     var bottomNavigationBar: some View {
         HStack(spacing: 0) {
             // Home Button
@@ -878,7 +930,7 @@ private extension HomeView {
             
             // Nearby Stops Button
             Button {
-                router.go(.studentDashboard)
+                router.go(.nearbyStops)
             } label: {
                 VStack(spacing: 4) {
                     Image(systemName: "location.fill")

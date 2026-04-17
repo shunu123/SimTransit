@@ -124,14 +124,14 @@ struct AdminHistoryView: View {
                             HStack(spacing: 14) {
                                 // Route Color Dot (hash-based)
                                 Circle()
-                                    .fill(routeColor(for: trip.route_name))
+                                    .fill(routeColor(for: trip.route_name ?? "Unknown"))
                                     .frame(width: 14, height: 14)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(trip.bus_number)
+                                    Text(trip.bus_number ?? "Unknown")
                                         .font(.headline)
                                         .foregroundStyle(theme.current.text)
-                                    Text(trip.route_name)
+                                    Text(trip.route_name ?? "Unknown")
                                         .font(.caption)
                                         .foregroundStyle(theme.current.secondaryText)
                                 }
@@ -139,7 +139,7 @@ struct AdminHistoryView: View {
                                 Spacer()
 
                                 VStack(alignment: .trailing, spacing: 4) {
-                                    Text("\(trip.points.count) pts")
+                                    Text("\((trip.points ?? []).count) pts")
                                         .font(.caption2.bold())
                                         .foregroundStyle(theme.current.secondaryText)
                                     Image(systemName: "chevron.right")
@@ -228,8 +228,8 @@ struct AdminHistoryMapSheet: View {
             // Map
             Map(position: $position) {
                 // Traveled polyline
-                if !trip.points.isEmpty {
-                    MapPolyline(coordinates: trip.points.map {
+                if let points = trip.points, !points.isEmpty {
+                    MapPolyline(coordinates: points.map {
                         CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lng)
                     })
                     .stroke(routeColor, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
@@ -295,7 +295,7 @@ struct AdminHistoryMapSheet: View {
                     withAnimation { showTimeline.toggle() }
                 } label: {
                     HStack {
-                        Text(trip.route_name)
+                        Text(trip.route_name ?? "Unknown")
                             .font(.headline.bold())
                             .foregroundStyle(theme.current.text)
                         Spacer()

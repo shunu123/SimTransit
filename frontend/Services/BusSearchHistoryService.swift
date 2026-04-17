@@ -1,9 +1,16 @@
 import Foundation
 
 /// Persists recently searched bus numbers.
+@MainActor
 final class BusSearchHistoryService {
     static let shared = BusSearchHistoryService()
-    private let key = "bus_number_history"
+    private var key: String {
+        if let uid = SessionManager.shared.currentUser?.id {
+            return "bus_number_history_\(uid)"
+        }
+        return "bus_number_history_guest"
+    }
+
     private let maxItems = 5
 
     private init() {}

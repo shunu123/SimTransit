@@ -19,7 +19,7 @@ struct RouteSelectionView: View {
                             if let firstBus = buses.first {
                                 // Assume this view is rendered in an AppRouter context
                                 if let window = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first,
-                                   let rootVC = window.rootViewController {
+                                   let _ = window.rootViewController {
                                     // Use notification or environment object
                                     NotificationCenter.default.post(name: NSNotification.Name("NavigateToBusSchedule"), object: firstBus.id)
                                 }

@@ -186,12 +186,6 @@ struct EditProfileView: View {
             do {
                 // In a real app, this would call APIService.shared.updateProfile(...)
                 // For now, we update local session and simulate success
-                let updatedData: [String: Any] = [
-                    "first_name": firstName,
-                    "last_name": lastName,
-                    "department": department,
-                    "year": year
-                ]
                 
                 // Assuming we have a way to update the user object locally or via API
                 // Let's check if session has an update method.

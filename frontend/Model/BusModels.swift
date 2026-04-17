@@ -1,7 +1,22 @@
-import Foundation
 import CoreLocation
 
+struct Coord: Identifiable, Hashable, Codable, Sendable {
+    let id: UUID
+    let lat: Double
+    let lon: Double
+    var isDiverted: Bool = false
 
+    nonisolated init(id: UUID = UUID(), lat: Double, lon: Double, isDiverted: Bool = false) {
+        self.id = id
+        self.lat = lat
+        self.lon = lon
+        self.isDiverted = isDiverted
+    }
+
+    nonisolated var cl: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+}
 
 /// Single, unique ping type
 struct LocationPing: Identifiable, Hashable, Codable {
@@ -69,8 +84,89 @@ struct Stop: Identifiable, Hashable, Codable {
     let platformNumber: String?
     let stopOrder: Int 
     let realtimeArrival: Date?
+    let scheduledArrival: String?
+    let scheduledDeparture: String?
+    var realtimeEta: String?
+    var realtimeDepartureEta: String?
 
-    init(id: String = UUID().uuidString, name: String, coordinate: Coord, timeText: String?, isMajorStop: Bool = true, platformNumber: String? = nil, stopOrder: Int = 0, realtimeArrival: Date? = nil) {
+    enum TimeSource: String, Codable {
+        case live = "LIVE"
+        case scheduled = "SCHED"
+    }
+
+    struct StopTiming: Codable {
+        let time: String
+        let source: TimeSource
+        var delayMinutes: Int? = nil
+    }
+
+    func timingResult(isRunning: Bool) -> StopTiming? {
+        if isRunning, let eta = realtimeEta, !eta.isEmpty {
+            // Calculate delay if possible
+            var delay: Int? = nil
+            if let sched = scheduledArrival {
+                delay = calculateDelay(live: eta, sched: sched)
+            }
+            return StopTiming(time: formatToShortTime(eta), source: .live, delayMinutes: delay)
+        }
+        
+        if let sched = scheduledArrival {
+            return StopTiming(time: formatToShortTime(sched), source: .scheduled)
+        }
+        
+        return nil
+    }
+
+    private func formatToShortTime(_ timeStr: String) -> String {
+        guard !timeStr.isEmpty else { return "--:--" }
+        
+        // 1. If it's a full ISO string (2026-04-01THH:mm:ss...)
+        if timeStr.contains("T") {
+            let parts = timeStr.components(separatedBy: "T")
+            if parts.count > 1 {
+                let timePart = parts[1] // HH:mm:ss...
+                let timeComponents = timePart.components(separatedBy: ":")
+                if timeComponents.count >= 2 {
+                    return "\(timeComponents[0]):\(timeComponents[1])"
+                }
+            }
+        }
+        
+        // 2. If it's HH:mm:ss format
+        if timeStr.contains(":") {
+            let parts = timeStr.components(separatedBy: ":")
+            if parts.count >= 2 {
+                // Ensure we only take the first two parts (HH and mm)
+                let hh = parts[0].suffix(2)
+                let mm = parts[1].prefix(2)
+                return "\(hh):\(mm)"
+            }
+        }
+        
+        return timeStr
+    }
+
+    private func calculateDelay(live: String, sched: String) -> Int? {
+        // Highly granular delay calculation
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm"
+        
+        // Normalize live time for comparison if ISO
+        let normalizedLive = formatToShortTime(live)
+        
+        guard let liveDate = df.date(from: normalizedLive), 
+              let schedDate = df.date(from: sched) else { return nil }
+        
+        let diff = liveDate.timeIntervalSince(schedDate)
+        let mins = Int(diff / 60)
+        return mins > 1 ? mins : nil
+    }
+
+    func displayTime(isRunning: Bool) -> String? {
+        return timingResult(isRunning: isRunning)?.time
+    }
+
+    init(id: String = UUID().uuidString, name: String, coordinate: Coord, timeText: String?, isMajorStop: Bool = true, platformNumber: String? = nil, stopOrder: Int = 0, realtimeArrival: Date? = nil, scheduledArrival: String? = nil, scheduledDeparture: String? = nil, realtimeEta: String? = nil, realtimeDepartureEta: String? = nil) {
         self.id = id
         self.name = name
         self.coordinate = coordinate
@@ -79,6 +175,10 @@ struct Stop: Identifiable, Hashable, Codable {
         self.platformNumber = platformNumber
         self.stopOrder = stopOrder
         self.realtimeArrival = realtimeArrival
+        self.scheduledArrival = scheduledArrival
+        self.scheduledDeparture = scheduledDeparture
+        self.realtimeEta = realtimeEta
+        self.realtimeDepartureEta = realtimeDepartureEta
     }
 }
 
@@ -100,6 +200,8 @@ struct Route: Identifiable, Hashable, Codable {
     var id: UUID
     var from: String
     var to: String
+    var startPointName: String = "Start"
+    var endPointName: String = "End"
     var stops: [Stop]
     var plannedPolyline: [Coord] = []
 
@@ -148,6 +250,7 @@ struct Bus: Identifiable, Hashable, Codable {
     var trackingStatus: TrackingStatus
     var etaMinutes: Int?
     var route: Route
+    var currentCoordinate: Coord? = nil
     var stateInfo: StateInfo?
     var vehicleId: Int? = nil // Backend ID (Trip ID)
     var busId: Int? = nil // Backend Bus ID
@@ -167,7 +270,51 @@ struct Bus: Identifiable, Hashable, Codable {
     var durationMinutes: Int? = nil // Requirement: minutes as int
     var currentStopName: String? = nil
     var nextStopName: String? = nil
+    var arrivalsAt: String = "--:--"
+    var nextStopETA: String = "--:--"
 
+    // New: Calculate delay label based on current time and ETA
+    var delayLabel: String {
+        guard let schedStr = (arrivalsAt != "--:--" ? arrivalsAt : nil), let eta = etaMinutes else { return "Scheduled" }
+        
+        let df = DateFormatter()
+        df.dateFormat = schedStr.contains("M") ? "h:mm a" : "HH:mm"
+        
+        guard let schedDate = df.date(from: schedStr) else { return "Scheduled" }
+        
+        let calendar = Calendar.current
+        let now = Date()
+        var components = calendar.dateComponents([.year, .month, .day], from: now)
+        let timeComponents = calendar.dateComponents([.hour, .minute], from: schedDate)
+        components.hour = timeComponents.hour
+        components.minute = timeComponents.minute
+        
+        guard let fullSchedDate = calendar.date(from: components) else { return "Scheduled" }
+        
+        // Day-wrap logic: If scheduled time is significantly in the past (e.g. > 12 hours), 
+        // assume it refers to the next day.
+        var finalSchedDate = fullSchedDate
+        if now.timeIntervalSince(fullSchedDate) > 43200 { // 12 hours
+            finalSchedDate = calendar.date(byAdding: .day, value: 1, to: fullSchedDate) ?? fullSchedDate
+        } else if fullSchedDate.timeIntervalSince(now) > 43200 {
+            // If scheduled is > 12 hours in future, assume it's for today but we are early
+        }
+
+        let projectedArrival = now.addingTimeInterval(TimeInterval(eta * 60))
+        let diffSecs = projectedArrival.timeIntervalSince(finalSchedDate)
+        let diffMins = Int(diffSecs / 60.0)
+        
+        if diffMins > 120 {
+            return isRunning ? "Live" : "Delayed"
+        } else if diffMins > 2 {
+            return "\(diffMins) min delayed"
+        } else if diffMins < -2 {
+            return "Early"
+        } else {
+            return "On Time"
+        }
+    }
+    
     // History Tracking
     var tripHistory: [String: TripRecord] = [:] // Map: "yyyy-MM-dd" -> TripRecord
 
@@ -205,6 +352,9 @@ struct Bus: Identifiable, Hashable, Codable {
         durationMinutes: Int? = nil,
         currentStopName: String? = nil,
         nextStopName: String? = nil,
+        arrivalsAt: String = "--:--",
+        nextStopETA: String = "--:--",
+        currentCoordinate: Coord? = nil,
         tripHistory: [String: TripRecord] = [:]
     ) {
         self.id = id
@@ -230,6 +380,9 @@ struct Bus: Identifiable, Hashable, Codable {
         self.durationMinutes = durationMinutes
         self.currentStopName = currentStopName
         self.nextStopName = nextStopName
+        self.arrivalsAt = arrivalsAt
+        self.nextStopETA = nextStopETA
+        self.currentCoordinate = currentCoordinate
         self.tripHistory = tripHistory
     }
 
@@ -339,16 +492,16 @@ struct FleetHistoryResponse: Codable {
 }
 
 struct FleetTrip: Codable, Identifiable {
-    var id: UUID { UUID() } // Local identifier for SwiftUI lists
+    var id: UUID { UUID() }
     let trip_id: Int
     let bus_id: Int
-    let bus_number: String
-    let route_name: String
-    let start_city: String
+    let bus_number: String?
+    let route_name: String?
+    let start_city: String?
     let status: String?
     let start_time: String?
     let end_time: String?
-    let actual_polyline: [FleetGPSPoint]
+    let actual_polyline: [FleetGPSPoint]?
     let stops: [FleetStop]?
 }
 
@@ -373,16 +526,16 @@ struct User: Codable, Identifiable {
     let reg_no: String
     let first_name: String?
     let last_name: String?
+    let email: String?
     let year: Int?
     let mobile_no: String?
-    let email: String?
     let college_name: String?
     let department: String?
     let specialization: String?
     let degree: String?
     let location: String?
     let bus_stop: String?
-    let role: String // 'student' or 'admin'
+    let role: String? // 'student' or 'admin'
 }
 
 struct AuthResponse: Codable {
@@ -391,6 +544,7 @@ struct AuthResponse: Codable {
     let detail: String?
     let requires_otp: Bool?
     let target: String?
+    let token: String?
 }
 
 struct GenericResponse: Codable {

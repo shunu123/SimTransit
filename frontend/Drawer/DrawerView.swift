@@ -70,7 +70,7 @@ struct DrawerView: View {
                             }
                         }
                         .padding(20)
-                        .padding(.top, 50) // Status bar
+                        .padding(.top, geometry.safeAreaInsets.top > 0 ? geometry.safeAreaInsets.top : 40)
                         .frame(maxWidth: .infinity)
                         .background(LinearGradient(colors: theme.current.primaryGradient, startPoint: .top, endPoint: .bottom))
                         
@@ -109,41 +109,20 @@ struct DrawerView: View {
                                         .font(.caption.weight(.bold))
                                         .foregroundStyle(theme.current.accent)
                                     
-                                    drawerRow(icon: "house.fill", title: "Home") { go(.home) }
                                     drawerRow(icon: "bookmark.fill", title: "Saved Routes") { go(.savedRoutes) }
                                     drawerRow(icon: "clock.fill", title: "Recent Searches") { go(.recentSearches) }
                                     
                                     if SessionManager.shared.userRole == "admin" {
-                                        drawerRow(icon: "map.fill", title: "Fleet Activity") { go(.activeFleet) }
                                         drawerRow(icon: "calendar.badge.plus", title: "Add Bus Schedule") { go(.adminScheduling) }
                                     }
                                 }
                                 
-                                Divider()
-                                
-                                // Reports (Student Only)
-                                if SessionManager.shared.userRole != "admin" {
-                                    VStack(alignment: .leading, spacing: 16) {
-                                        Text("REPORTS")
-                                            .font(.caption.weight(.bold))
-                                            .foregroundStyle(Color.orange)
-                                        
-                                        drawerRow(icon: "exclamationmark.bubble.fill", title: "Report Issue") { go(.report) }
-                                    }
-                                    
-                                    Divider()
-                                }
-                                
-                                // Support
+                                // Support & Feedback leads to Settings
                                 VStack(alignment: .leading, spacing: 16) {
-                                    Text("SUPPORT")
+                                    Text("APP")
                                         .font(.caption.weight(.bold))
-                                        .foregroundStyle(Color.green)
+                                        .foregroundStyle(theme.current.accent)
                                     
-                                    if SessionManager.shared.userRole != "admin" {
-                                        drawerRow(icon: "questionmark.circle", title: "Help & FAQ") { go(.help) }
-                                    }
-                                    drawerRow(icon: "info.circle", title: "About") { go(.about) }
                                     drawerRow(icon: "star", title: "Rate App") {
                                         withAnimation {
                                             isOpen = false
@@ -185,7 +164,7 @@ struct DrawerView: View {
                                 .padding(.vertical, 16)
                         }
                     }
-                    .frame(width: geometry.size.width * 0.85) // Wider drawer
+                    .frame(width: min(geometry.size.width * 0.8, 300)) // Native feeling width
                     .background(theme.current.background)
                     .transition(.move(edge: .leading))
                 }

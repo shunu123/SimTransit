@@ -11,12 +11,12 @@ struct ActiveFleetMapView: View {
     @StateObject private var busRepo = BusRepository.shared
     
     @State private var position: MapCameraPosition = .region(MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: 28.6139, longitude: 77.2090),
+        center: CLLocationCoordinate2D(latitude: 13.028757, longitude: 80.019844),
         span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
     ))
     // Track span separately — position.region becomes nil after panning (MapKit bug)
     @State private var currentSpan = MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
-    @State private var currentCenter = CLLocationCoordinate2D(latitude: 28.6139, longitude: 77.2090)
+    @State private var currentCenter = LocationManager.shared.userLocation?.coordinate ?? CLLocationCoordinate2D(latitude: 13.028757, longitude: 80.019844)
     @State private var liveBuses: [GPSPoint] = []
     @State private var availableRoutes: [String] = []
     @State private var selectedRoute: String? = nil
@@ -420,11 +420,11 @@ struct ActiveFleetMapView: View {
                     
                     let newStops = details.timeline.map { stop in
                         Stop(
-                            id: stop.stop_id,
-                            name: stop.stop_name,
-                            coordinate: Coord(lat: Double(stop.lat) ?? 0, lon: Double(stop.lng) ?? 0),
-                            timeText: stop.eta,
-                            isMajorStop: stop.is_major,
+                            id: stop.id,
+                            name: stop.stopName,
+                            coordinate: Coord(lat: stop.lat, lon: stop.lng),
+                            timeText: stop.realtimeEta ?? stop.schedArrival ?? stop.eta,
+                            isMajorStop: stop.isMajor ?? true,
                             stopOrder: 0
                         )
                     }
@@ -480,12 +480,12 @@ struct ActiveFleetMapView: View {
                 if isHistoricalMode {
                     // Full paths
                     ForEach(filteredHistTrips) { trip in
-                        if !trip.points.isEmpty {
-                            MapPolyline(coordinates: trip.points.map {
+                        if let points = trip.points, !points.isEmpty {
+                            MapPolyline(coordinates: points.map {
                                 CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lng)
                             })
                             .stroke(
-                                routeColor(for: trip.route_name).opacity(0.3),
+                                routeColor(for: trip.route_name ?? "").opacity(0.3),
                                 style: StrokeStyle(lineWidth: selectedHistTrip?.id == trip.id ? 8 : 4,
                                                   lineCap: .round, lineJoin: .round)
                             )
@@ -810,7 +810,7 @@ struct ActiveFleetMapView: View {
         return historyTrips.compactMap { trip -> GPSPoint? in
             // Logic to find interpolated point for trip at currentTimeInSec
             // For simplicity, find closest point in trip.points
-            let points = trip.points
+            let points = trip.points ?? []
             guard !points.isEmpty else { return nil }
             
             // Simple: return the point whose timestamp is nearest to playbackTime
@@ -844,9 +844,9 @@ struct ActiveFleetMapView: View {
             VStack(spacing: 16) {
                 HStack {
                     VStack(alignment: .leading) {
-                        Text(trip.bus_number)
+                        Text(trip.bus_number ?? "Unknown")
                             .font(.title2.bold())
-                        Text(trip.route_name)
+                        Text(trip.route_name ?? "Unknown")
                             .font(.subheadline)
                             .foregroundStyle(theme.current.secondaryText)
                     }
@@ -859,9 +859,9 @@ struct ActiveFleetMapView: View {
                 }
                 
                 HStack {
-                    Label("\(trip.points.count) Points", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                    Label("\((trip.points ?? []).count) Points", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
                     Spacer()
-                    if let first = trip.points.first?.ts, let last = trip.points.last?.ts {
+                    if let points = trip.points, let first = points.first?.ts, let last = points.last?.ts {
                         Text("\(first.suffix(8)) - \(last.suffix(8))")
                     }
                 }
@@ -1002,7 +1002,7 @@ struct ActiveFleetMapView: View {
                     historyTrips = trips
                     isLoadingHistory = false
                     // Update route filter pills with history routes
-                    availableRoutes = Array(Set(trips.map { $0.route_name })).sorted()
+                    availableRoutes = Array(Set(trips.compactMap { $0.route_name })).sorted()
                     // Auto-center map on first trip's points
                     if !trips.isEmpty {
                         centerMapOnHistory(trips)
@@ -1025,14 +1025,14 @@ struct ActiveFleetMapView: View {
             .sink { [self] vehicles in
                 // Convert WSVehicle → GPSPoint (compatible with existing map rendering)
                 let pts: [GPSPoint] = vehicles.compactMap { (v: WSVehicle) -> GPSPoint? in
-                    guard let lat = Double(v.lat ?? ""), let lng = Double(v.lon ?? "") else { return nil }
+                    guard let lat = v.lat, let lng = v.lon, lat != 0, lng != 0 else { return nil }
                     return GPSPoint.make(
                         busId: nil,
                         tripId: Int(v.vid ?? "0"),
                         lat: lat,
                         lng: lng,
-                        speed: Double(v.spd ?? 0),
-                        heading: Double(v.hdg ?? "0") ?? 0,
+                        speed: v.spd ?? 0,
+                        heading: v.hdg ?? 0,
                         routeName: v.rt,
                         ts: v.tmstmp,
                         extVehicleId: v.vid,
@@ -1050,7 +1050,8 @@ struct ActiveFleetMapView: View {
                     }
                     
                     // Rebuild Quadtree for fast spatial queries
-                    let tree = Quadtree(boundary: QuadtreeRect(minLat: 28.0, maxLat: 29.0, minLon: 76.0, maxLon: 78.0), capacity: 32)
+                    // SPATIAL FIX: Changed boundary from Delhi (28-29) to Chennai (12.8-13.3)
+                    let tree = Quadtree(boundary: QuadtreeRect(minLat: 12.8, maxLat: 13.3, minLon: 79.8, maxLon: 80.4), capacity: 32)
                     for pt in pts { tree.insert(pt) }
                     self.quadtree = tree
                     
@@ -1070,10 +1071,18 @@ struct ActiveFleetMapView: View {
                     }
                 }
                 
-                if isFirstCenter, let first = pts.first {
-                    let center = CLLocationCoordinate2D(latitude: first.lat, longitude: first.lng)
+                if isFirstCenter && !pts.isEmpty {
+                    var minLat = 90.0, maxLat = -90.0
+                    var minLon = 180.0, maxLon = -180.0
+                    for pt in pts {
+                        minLat = min(minLat, pt.lat); maxLat = max(maxLat, pt.lat)
+                        minLon = min(minLon, pt.lng); maxLon = max(maxLon, pt.lng)
+                    }
+                    let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2)
+                    let span = MKCoordinateSpan(latitudeDelta: max(maxLat - minLat + 0.05, 0.1), longitudeDelta: max(maxLon - minLon + 0.05, 0.1))
+                    
                     withAnimation {
-                        self.position = .region(MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)))
+                        self.position = .region(MKCoordinateRegion(center: center, span: span))
                     }
                     self.isFirstCenter = false
                 }
@@ -1128,7 +1137,7 @@ struct ActiveFleetMapView: View {
     }
     
     private func centerMapOnHistory(_ trips: [AdminHistoryTrip]) {
-        let allPoints = trips.flatMap { $0.points }
+        let allPoints = trips.flatMap { $0.points ?? [] }
         guard !allPoints.isEmpty else { return }
         
         var minLat = 90.0, maxLat = -90.0
@@ -1163,7 +1172,7 @@ struct ActiveFleetMapView: View {
                     let details = try await APIService.shared.fetchFullTripDetails(routeId: rt, direction: dir, vehicleId: vid)
                     
                     let newStops = details.timeline.map { stop in
-                        Stop(id: stop.stop_id, name: stop.stop_name, coordinate: Coord(lat: Double(stop.lat) ?? 0, lon: Double(stop.lng) ?? 0), timeText: stop.eta, isMajorStop: stop.is_major, stopOrder: 0)
+                        Stop(id: stop.id, name: stop.stopName, coordinate: Coord(lat: stop.lat, lon: stop.lng), timeText: stop.realtimeEta ?? stop.schedArrival ?? stop.eta, isMajorStop: stop.isMajor ?? true, stopOrder: 0)
                     }
                     
                     await MainActor.run {

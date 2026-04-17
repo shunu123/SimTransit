@@ -240,7 +240,7 @@ struct LoginView: View {
         
         isLoading = true
         do {
-            let response = try await APIService.shared.login(regNoOrEmail: regNoOrEmail, password: ["password": password])
+            let response = try await APIService.shared.login(regNoOrEmail: regNoOrEmail, password: password)
             
             if response.requiresOTP == true, let target = response.target {
                 // Secret Admin route engaged

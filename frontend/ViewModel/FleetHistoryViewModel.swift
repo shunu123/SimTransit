@@ -14,8 +14,9 @@ final class FleetHistoryViewModel: ObservableObject {
     @Published var visibleRoutes: Set<String> = ["Chennai", "Kancheepuram", "Vellore"]
     
     // Destination hub
-    let destinationHub = Coord(lat: 13.0287, lon: 80.0071) // Saveetha Engineering College
-    let destinationName = "Saveetha Engineering College"
+    // Destination hub (Neutralized to allow backend-only flow)
+    let destinationHub = Coord(lat: 0, lon: 0)
+    let destinationName = "Destination"
     
     // MARK: - Helper Structs
     struct RouteInfo: Identifiable, Equatable {
@@ -132,100 +133,72 @@ final class FleetHistoryViewModel: ObservableObject {
     
     // MARK: - Functions
     func loadHistory(for date: Date) {
-        isLoading = true
-        allTrips = []
-        selectedTrip = nil
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let dateStr = f.string(from: date)
         
+        self.isLoading = true
         Task {
-            let dateKey = DateFormatter()
-            dateKey.dateFormat = "yyyy-MM-dd"
-            let dateString = dateKey.string(from: date)
-            
             do {
-                let fleetData = try await APIService.shared.fetchFleetHistory(date: dateString)
-                var fetchedTrips: [HistoryTripDisplay] = []
-                
-                let isoFormatter = ISO8601DateFormatter()
-                isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                let basicFormatter = ISO8601DateFormatter()
-                let displayFormatter = DateFormatter()
-                displayFormatter.dateFormat = "hh:mm a"
-                
-                for trip in fleetData {
-                    var polyline: [Coord] = []
-                    for pt in trip.actual_polyline {
-                        polyline.append(Coord(lat: pt.lat, lon: pt.lng))
-                    }
-                    
-                    var startTimeStr = "--"
-                    if let st = trip.start_time {
-                        if let d = isoFormatter.date(from: st) ?? basicFormatter.date(from: st) {
-                            startTimeStr = displayFormatter.string(from: d)
-                        } else {
-                            // try naive fallback
-                            let parts = st.components(separatedBy: "T")
-                            if parts.count > 1 {
-                                let timeParts = parts[1].components(separatedBy: ":")
-                                if timeParts.count >= 2, let hr = Int(timeParts[0]) {
-                                    let ampm = hr >= 12 ? "PM" : "AM"
-                                    let hr12 = hr > 12 ? hr - 12 : (hr == 0 ? 12 : hr)
-                                    startTimeStr = String(format: "%02d:%@ %@", hr12, timeParts[1], ampm)
-                                }
-                            }
-                        }
-                    }
-                    
-                    var endTimeStr = "Ongoing"
-                    if let et = trip.end_time, trip.status == "COMPLETED" {
-                        if let d = isoFormatter.date(from: et) ?? basicFormatter.date(from: et) {
-                            endTimeStr = displayFormatter.string(from: d)
-                        }
-                    }
-                    
-                    var historyStops: [HistoryStop] = []
-                    if let fetchedStops = trip.stops {
-                        for fs in fetchedStops {
-                            historyStops.append(HistoryStop(
-                                stopName: fs.stop_name, 
-                                coordinate: Coord(lat: fs.lat, lon: fs.lng),
-                                reachedTime: fs.reached_time
-                            ))
-                        }
-                    }
-                    
-                    // Fallback to BusRepository ID for deep linking
-                    let knownBusId = BusRepository.shared.allBuses.first(where: { $0.vehicleId == trip.trip_id || $0.busId == trip.bus_id })?.id ?? UUID()
-                    
-                    let displayTrip = HistoryTripDisplay(
-                        id: UUID(),
-                        busNumber: trip.bus_number,
-                        busId: knownBusId,
-                        routeName: trip.route_name,
-                        startCity: trip.start_city,
-                        actualPolyline: polyline,
-                        isDeviated: false, // Could compute from planned vs actual in future
-                        status: trip.status ?? "SCHEDULED",
-                        startTime: startTimeStr,
-                        endTime: endTimeStr,
-                        reachedTime: nil,
-                        duration: trip.status == "COMPLETED" ? "Done" : "Live",
-                        stops: historyStops
-                    )
-                    fetchedTrips.append(displayTrip)
-                }
+                let fleetHistory = try await APIService.shared.fetchFleetHistory(date: dateStr)
                 
                 await MainActor.run {
-                    self.allTrips = fetchedTrips
-                    self.visibleRoutes = Set(fetchedTrips.map { $0.startCity })
+                    self.allTrips = fleetHistory.map { trip in
+                        let stops = (trip.stops ?? []).map { stop in
+                            HistoryStop(
+                                id: UUID(),
+                                stopName: stop.stop_name,
+                                coordinate: Coord(lat: stop.lat, lon: stop.lng),
+                                reachedTime: stop.reached_time
+                            )
+                        }
+                        
+                        let actualPolyline = (trip.actual_polyline ?? []).map { pt in
+                            Coord(lat: pt.lat, lon: pt.lng)
+                        }
+                        
+                        // Find matching bus in repo or create a stable UUID
+                        let busId = BusRepository.shared.allBuses.first(where: { 
+                            $0.vehicleId == trip.trip_id || $0.busId == trip.bus_id || $0.number == trip.bus_number
+                        })?.id ?? UUID()
+                        
+                        return HistoryTripDisplay(
+                            id: UUID(),
+                            busNumber: trip.bus_number ?? "N/A",
+                            busId: busId,
+                            routeName: trip.route_name ?? "Route",
+                            startCity: trip.start_city ?? "Unknown",
+                            actualPolyline: actualPolyline,
+                            isDeviated: false,
+                            status: trip.status ?? "COMPLETED",
+                            startTime: trip.start_time ?? "--",
+                            endTime: trip.end_time ?? "--",
+                            reachedTime: trip.end_time,
+                            duration: calculateDuration(start: trip.start_time, end: trip.end_time),
+                            stops: stops
+                        )
+                    }
                     self.isLoading = false
+                    self.showAllRoutes()
                 }
             } catch {
-                print("Failed to fetch fleet history:", error)
+                print("Failed to load history: \(error)")
                 await MainActor.run {
                     self.isLoading = false
+                    self.allTrips = []
                 }
             }
         }
+    }
+    
+    private func calculateDuration(start: String?, end: String?) -> String {
+        guard let start = start, let end = end else { return "--" }
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        guard let sDate = f.date(from: start), let eDate = f.date(from: end) else { return "--" }
+        let diff = eDate.timeIntervalSince(sDate)
+        let mins = Int(diff / 60)
+        return "\(abs(mins))m"
     }
     
     // MARK: - Timeline Generation

@@ -35,7 +35,7 @@ final class TripDetailTimelineViewModel: ObservableObject {
     static func calculateRegion(for points: [Coord]) -> MKCoordinateRegion {
         guard !points.isEmpty else {
             return MKCoordinateRegion(
-                center: CLLocationCoordinate2D(latitude: 13.0287, longitude: 80.0071),
+                center: CLLocationCoordinate2D(latitude: 0, longitude: 0),
                 span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
             )
         }

@@ -11,13 +11,16 @@ final class StopSuggestionService {
     // MARK: - Public API
 
     /// Returns live suggestions from the backend for a given query (min 2 chars).
-    func suggestions(query: String) async -> [BusStop] {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    func suggestions(query: String, regNo: String? = nil, role: String? = nil) async -> [BusStop] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard trimmed.count >= 2 else { return [] }
 
         do {
             let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
-            let url = URL(string: "\(APIConfig.baseURL)/api/search/suggestions?q=\(encoded)")!
+            var urlString = "\(APIConfig.baseURL)/api/search/suggestions?q=\(encoded)"
+            if let r = regNo { urlString += "&reg_no=\(r)" }
+            if let rl = role { urlString += "&role=\(rl)" }
+            let url = URL(string: urlString)!
             var request = URLRequest(url: url)
             request.addValue("true", forHTTPHeaderField: "bypass-tunnel-reminder")
             request.addValue("application/json", forHTTPHeaderField: "Accept")

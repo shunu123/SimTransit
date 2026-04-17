@@ -162,7 +162,7 @@ struct BusScheduleView: View {
                     Spacer()
                     
                     // Prominent Duration
-                    durationBadge(eta: vm.durationToDestination)
+                    durationBadge(eta: vm.totalDurationToDestination)
                 }
                 .padding(.bottom, 20)
             }
@@ -313,9 +313,17 @@ struct BusScheduleView: View {
         
         return VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 0) {
+                // 1. Arrival Column (Left)
+                arrivalColumn(stop: stop, isPast: isPast, isCurrent: isCurrent)
+                    .frame(width: 80)
+                
+                // 2. Indicator Column (Center)
                 timelineIndicator(index: index, originalIndex: originalIndex, liveIndex: liveIndex, isCurrent: isCurrent)
-                stopContent(index: index, stop: stop, originalIndex: originalIndex, liveIndex: liveIndex, isCurrent: isCurrent, isUpcoming: isUpcoming, isPast: isPast)
-                Spacer()
+                
+                // 3. Stop Details Card (Right)
+                stopDetailsCard(stop: stop, isPast: isPast, isCurrent: isCurrent, isUpcoming: isUpcoming, originalIndex: originalIndex)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 24)
             }
             .padding(.horizontal, 8)
             
@@ -323,6 +331,55 @@ struct BusScheduleView: View {
                 deviationMarkerRow
             }
         }
+    }
+
+    private func arrivalColumn(stop: Stop, isPast: Bool, isCurrent: Bool) -> some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            let result = stop.timingResult(isRunning: vm.bus.isRunning)
+            
+            Text(result?.time ?? "--:--")
+                .font(.system(size: 18, weight: .black))
+                .foregroundStyle(isCurrent ? .blue : (isPast ? .secondary : .primary))
+            
+            if let timing = result {
+                HStack(spacing: 4) {
+                    if let delay = timing.delayMinutes, delay > 2 {
+                        Text("\(delay)m delay")
+                            .font(.system(size: 8, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.red.opacity(0.1))
+                            .foregroundStyle(.red)
+                            .cornerRadius(4)
+                    }
+                    
+                    Text(timing.source.rawValue)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(timing.source == .live ? .green : .secondary)
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func formatToShortTime(_ timeStr: String) -> String {
+        // Handle ISO8601 or HH:mm:ss
+        if timeStr.contains("T") {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = f.date(from: timeStr) {
+                let out = DateFormatter()
+                out.dateFormat = "HH:mm"
+                return out.string(from: date)
+            }
+        }
+        if timeStr.contains(":") {
+            let parts = timeStr.components(separatedBy: ":")
+            if parts.count >= 2 {
+                 return "\(parts[0]):\(parts[1])"
+            }
+        }
+        return timeStr
     }
 
     private func timelineIndicator(index: Int, originalIndex: Int, liveIndex: Int, isCurrent: Bool) -> some View {
@@ -360,66 +417,76 @@ struct BusScheduleView: View {
         .frame(width: 40)
     }
 
-    @ViewBuilder
-    private func stopContent(index: Int, stop: Stop, originalIndex: Int, liveIndex: Int, isCurrent: Bool, isUpcoming: Bool, isPast: Bool) -> some View {
-        let stopIndex = index
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .center) {
+    private func stopDetailsCard(stop: Stop, isPast: Bool, isCurrent: Bool, isUpcoming: Bool, originalIndex: Int) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(stop.name)
-                    .font(.system(size: 17, weight: isCurrent ? .bold : .semibold))
+                    .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(isPast ? .secondary : .primary)
-
-                if vm.alarmEnabled, stop.name == vm.alarmStopName {
-                    HStack(spacing: 2) {
-                        Image(systemName: "bell.fill")
-                        Text("Alarm Set")
+                
+                if isCurrent {
+                    HStack(spacing: 4) {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 10))
+                        Text("Currently Here")
+                            .font(.system(size: 11, weight: .bold))
                     }
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.15))
-                    .cornerRadius(8)
-                }
-            }
-
-            // Scheduled / ETA time chip
-            if let timeStr = stop.timeText, !timeStr.isEmpty, timeStr != "0 min" {
-                HStack(spacing: 4) {
-                    Image(systemName: isCurrent ? "location.fill" : (isPast ? "checkmark.circle.fill" : "clock"))
-                        .font(.system(size: 10))
-                        .foregroundStyle(isCurrent ? .blue : (isPast ? .green : .secondary))
-                    Text(isPast ? "Reached \(timeStr)" : (isCurrent ? "Arriving now" : "ETA \(timeStr)"))
-                        .font(.caption.bold())
-                        .foregroundStyle(isCurrent ? .blue : (isPast ? .green : .secondary))
-                }
-            } else if isCurrent {
-                Text("Arriving now")
-                    .font(.caption.bold())
                     .foregroundStyle(.blue)
+                } else if isUpcoming {
+                    let result = stop.timingResult(isRunning: vm.bus.isRunning)
+                    let displayTime = result?.time ?? "--:--"
+                    
+                    HStack(spacing: 4) {
+                        if result?.source == .live {
+                            Image(systemName: "apple.logo")
+                        }
+                        Text("ETA: \(displayTime)")
+                    }
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(result?.source == .live ? .blue : .secondary)
+                }
             }
-
-            // Deviation / delay badges
-            if bus.isDeviated && originalIndex == vm.deviationStartStopIndex {
-                EmptyView()
-            } else if bus.isDeviated && isUpcoming {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.caption2)
-                    Text("Delayed due to deviation")
+            
+            Spacer()
+            
+            // Departure Logic (Right side of card)
+            VStack(alignment: .trailing, spacing: 2) {
+                if let dep = stop.realtimeDepartureEta ?? stop.scheduledDeparture {
+                    Text(formatToShortTime(dep))
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(isPast ? .secondary : .primary)
+                    Text("DEPARTURE")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.secondary)
                 }
-                .font(.caption.bold())
-                .foregroundStyle(.orange)
-            } else if let status = bus.statusDetail, status.lowercased().contains("delay"), isUpcoming {
-                HStack(spacing: 4) {
-                    Image(systemName: "clock.badge.exclamationmark").font(.caption2)
-                    Text(status)
-                }
-                .font(.caption)
-                .foregroundStyle(.orange)
             }
         }
-        .padding(.top, 4)
-        .padding(.bottom, 28)
+        .padding(16)
+        .background {
+            if isCurrent {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.blue.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.blue.opacity(0.2), lineWidth: 1)
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.gray.opacity(0.03))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.gray.opacity(0.1), lineWidth: 1)
+                    )
+            }
+        }
+    }
+
+    private func minutesBetween(_ start: Date, _ futureStr: String) -> Int? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = f.date(from: futureStr) else { return nil }
+        let diff = date.timeIntervalSince(start)
+        return Int(diff / 60)
     }
 
     private var actionButtons: some View {

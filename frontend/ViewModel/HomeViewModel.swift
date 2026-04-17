@@ -3,6 +3,7 @@ import Combine
 import Speech
 import AVFoundation
 import CoreLocation
+import SwiftUI
 
 @MainActor
 final class HomeViewModel: ObservableObject {
@@ -39,6 +40,8 @@ final class HomeViewModel: ObservableObject {
     // MARK: - Voice
     @Published var voice: VoiceAssistant = VoiceAssistant()
     @Published var isSpeechAuthorized: Bool = false
+    @Published var isListening: Bool = false
+    @Published var transcript: String = ""
 
     // MARK: - Permissions overlay
     @Published var showPermissions: Bool = false
@@ -47,6 +50,9 @@ final class HomeViewModel: ObservableObject {
     @Published var dynamicHeaderInfo: String = ""
     @Published var showDynamicHeader: Bool = false
     @Published var isLoading: Bool = false
+    @Published var errorMessage: String? = nil
+    @Published var isSearchingFrom: Bool = false
+    @Published var isSearchingTo: Bool = false
 
     // MARK: - Router (set by HomeView.onAppear)
     var router: AppRouter?
@@ -61,7 +67,22 @@ final class HomeViewModel: ObservableObject {
         
         // Auto-process when voice assistant detects silence
         voice.onSilenceRecognized = { [weak self] in
-            self?.processVoiceCommand()
+            Task { @MainActor in
+                self?.processVoiceCommand()
+            }
+        }
+        
+        // Modern async sequence bindings
+        Task { [weak self] in
+            for await val in voice.$isListening.values {
+                self?.isListening = val
+            }
+        }
+        
+        Task { [weak self] in
+            for await val in voice.$transcript.values {
+                self?.transcript = val
+            }
         }
     }
 
@@ -100,11 +121,14 @@ final class HomeViewModel: ObservableObject {
                         }
                     }
                     self.recentSearches = finalSearches
+                    self.isLoading = false
                 }
             } catch {
-                print("Failed to load backend searches: \(error.localizedDescription)")
+                await MainActor.run {
+                    self.isLoading = false
+                    print("Failed to load backend searches: \(error.localizedDescription)")
+                }
             }
-            isLoading = false
         }
     }
 
@@ -174,17 +198,22 @@ final class HomeViewModel: ObservableObject {
         let ds = (trip.fromDeparture ?? "--").replacingOccurrences(of: "Z", with: "")
         var departsAtStr = "--"
         let parts = ds.components(separatedBy: "T")
-        if parts.count > 1 {
-            let timeParts = parts[1].components(separatedBy: ":")
-            if timeParts.count >= 2, let hr = Int(timeParts[0]) {
+        let timeString = parts.count > 1 ? parts[1] : ""
+        let timeParts = timeString.components(separatedBy: ":")
+        if timeParts.count >= 2 {
+            let hourStr = timeParts[0]
+            let minStr = timeParts[1]
+            if let hr = Int(hourStr) {
                 let ampm = hr >= 12 ? "PM" : "AM"
                 let hr12 = hr > 12 ? hr - 12 : (hr == 0 ? 12 : hr)
-                departsAtStr = String(format: "%02d:%@ %@", hr12, timeParts[1], ampm)
+                departsAtStr = String(format: "%02d:%@ %@", hr12, minStr, ampm)
             }
         }
 
-        let existingId = BusRepository.shared.allBuses.first(where: { 
-            $0.extTripId == trip.extTripId || ($0.vehicleId != nil && $0.vehicleId == trip.tripId)
+        let existingId = BusRepository.shared.allBuses.first(where: { bus in
+            if let extID = bus.extTripId, extID == trip.extTripId { return true }
+            if let vid = bus.vehicleId, vid == trip.tripId { return true }
+            return false
         })?.id ?? UUID()
 
         return Bus(
@@ -212,16 +241,24 @@ final class HomeViewModel: ObservableObject {
     }
 
     func requestPermissions() {
+        #if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        session.requestRecordPermission { [weak self] granted in
+            Task { @MainActor in
+                self?.isSpeechAuthorized = granted
+            }
+        }
+        #else
+        // On macOS, recording permissions are handled differently, often via Info.plist or System Preferences.
+        // For now, assume authorized if we can access the engine.
+        self.isSpeechAuthorized = true
+        #endif
+        
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             Task { @MainActor in
                 self?.isSpeechAuthorized = (status == .authorized)
                 self?.showPermissions = false
             }
-        }
-        if #available(iOS 17.0, *) {
-            AVAudioApplication.requestRecordPermission { _ in }
-        } else {
-            AVAudioSession.sharedInstance().requestRecordPermission { _ in }
         }
     }
 
@@ -232,117 +269,74 @@ final class HomeViewModel: ObservableObject {
     // MARK: - Voice Command
 
     func processVoiceCommand() {
-        var text = voice.transcript
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !text.isEmpty else { return }
+        let transcript = voice.transcript.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        guard !transcript.isEmpty else { return }
         
-        // 0. Normalize numbers (e.g., "twenty" -> "20")
-        text = normalizeNumbers(text)
-
-        // 1. Action Commands
-        if text.contains("go back") || text.contains("return") || text.contains("back") {
-            voice.speak(text: "Going back.")
-            router?.back()
-            return
-        }
-        if text.contains("live fleet") || text.contains("active fleet") || text.contains("show all buses") {
-            voice.speak(text: "Opening the live fleet map.")
-            router?.go(.activeFleet)
-            return
-        }
-        if text.contains("settings") || text.contains("profile") {
-            voice.speak(text: "Opening settings.")
-            router?.go(.settings)
-            return
-        }
-        if text.contains("history") || text.contains("recent") {
-            voice.speak(text: "Showing your recent searches.")
-            router?.go(.recentSearches)
-            return
-        }
-
-        // 2. Complex patterns: "to X from Y" or "from Y to X"
-        // Pattern: "to [Dest] from [Source]"
-        if let toRange = text.range(of: "to "),
-           let fromRange = text.range(of: " from "),
-           toRange.lowerBound < fromRange.lowerBound {
-            let to = String(text[toRange.upperBound..<fromRange.lowerBound]).trimmingCharacters(in: .whitespaces).capitalized
-            let from = String(text[fromRange.upperBound...]).trimmingCharacters(in: .whitespaces).capitalized
-            if !to.isEmpty && !from.isEmpty {
-                fromText = from
-                toText = to
-                voice.speak(text: "Finding buses from \(from) to \(to).")
-                router?.go(.availableBuses(from: from, to: to, fromLat: nil, fromLon: nil, toLat: nil, toLon: nil, via: nil))
-
-
-                return
+        Task {
+            // Show loading if needed, or just process
+            if let response = await LLMVoiceParser.shared.parseIntent(transcript: transcript) {
+                handleLLMResponse(response)
+            } else {
+                voice.speak(text: "I couldn't quite understand that online. Please check your connection.")
             }
         }
+    }
+    
+    @MainActor
+    private func handleLLMResponse(_ res: LLMIntentResponse) {
+        print("🎯 Command: \(res.command)")
         
-        // Pattern: "from [Source] to [Dest]"
-        if let fromRange = text.range(of: "from "),
-           let toRange = text.range(of: " to "),
-           fromRange.lowerBound < toRange.lowerBound {
-            let from = String(text[fromRange.upperBound..<toRange.lowerBound]).trimmingCharacters(in: .whitespaces).capitalized
-            let to = String(text[toRange.upperBound...]).trimmingCharacters(in: .whitespaces).capitalized
-            if !from.isEmpty && !to.isEmpty {
+        // Always speak back if the backend provided a response
+        if let feedback = res.speech_response {
+            voice.speak(text: feedback)
+        }
+        
+        switch res.command {
+        case "SEARCH":
+            if let from = res.from_stop, let to = res.to_stop {
                 fromText = from
                 toText = to
-                voice.speak(text: "Finding buses from \(from) to \(to).")
-                router?.go(.availableBuses(from: from, to: to, fromLat: nil, fromLon: nil, toLat: nil, toLon: nil, via: nil))
-
-
-                return
+                router?.go(AppRouter.AppPage.availableBuses(from: from, to: to))
+            } else if let from = res.from_stop {
+                fromText = from
+                // Wait for destination
+            } else if let to = res.to_stop {
+                toText = to
+                // Wait for starting point
             }
-        }
-
-        // 3. Simple Route/Bus search: "Route 20", "Bus 20", "Show twenty"
-        let busKeywords = ["route", "bus", "show", "track", "find"]
-        for kw in busKeywords {
-            if let range = text.range(of: kw) {
-                let rest = String(text[range.upperBound...]).trimmingCharacters(in: .whitespaces)
-                let components = rest.components(separatedBy: .whitespaces)
-                if let firstWord = components.first, !firstWord.isEmpty {
-                    // Try to find by number
-                    if let bus = BusRepository.shared.allBuses.first(where: { 
-                        $0.number.lowercased() == firstWord || $0.number.lowercased().contains(firstWord)
-                    }) {
-                        voice.speak(text: "Showing schedule for Route \(bus.number).")
-                        router?.go(.busSchedule(busID: bus.id.uuidString))
-                        return
-                    }
+            
+        case "TRACK":
+            if let num = res.bus_number {
+                self.busNumberSearch = num
+                router?.go(AppRouter.AppPage.trackByNumber(autoStartVoice: false))
+            }
+            
+        case "NAVIGATE":
+            if let screen = res.screen {
+                switch screen.uppercased() {
+                case "HELP": router?.go(.help)
+                case "REPORT": router?.go(.report)
+                case "ABOUT": router?.go(.about)
+                case "LOGOUT":
+                    SessionManager.shared.logout()
+                    router?.popToRoot()
+                case "HISTORY": router?.go(.recentSearches)
+                case "FLEET_MAP": router?.go(.activeFleet)
+                case "SETTINGS": router?.go(.settings)
+                case "ALL_ROUTES": router?.go(.allRoutes)
+                case "BACK": router?.back()
+                case "HOME": router?.popToRoot()
+                default: break
                 }
             }
+            
+        case "STATUS":
+            // Just status, speech handled above
+            break
+            
+        default:
+            print("Unknown voice command: \(res.command)")
         }
-
-        // 4. "Buses at [Stop]"
-        if let atRange = text.range(of: " at ") {
-            let stopName = String(text[atRange.upperBound...]).trimmingCharacters(in: .whitespaces).capitalized
-            if !stopName.isEmpty {
-                voice.speak(text: "Checking buses arriving at \(stopName).")
-                router?.go(.busesAtStop(stopName: stopName))
-                return
-            }
-        }
-
-        // 5. Global Fuzzy Fallback
-        let bestMatch = BusRepository.shared.allBuses.min { b1, b2 in
-            let d1 = min(levenshtein(text, b1.route.from.lowercased()), levenshtein(text, b1.headsign.lowercased()))
-            let d2 = min(levenshtein(text, b2.route.from.lowercased()), levenshtein(text, b2.headsign.lowercased()))
-            return d1 < d2
-        }
-
-        if let bus = bestMatch {
-            let d = min(levenshtein(text, bus.route.from.lowercased()), levenshtein(text, bus.headsign.lowercased()))
-            if d <= max(4, text.count / 2) {
-                voice.speak(text: "Navigating to Route \(bus.number), \(bus.headsign).")
-                router?.go(.busSchedule(busID: bus.id.uuidString))
-                return
-            }
-        }
-        
-        voice.speak(text: "I didn't quite catch that. Try saying something like, 'Show route twenty'.")
     }
     
     private func normalizeNumbers(_ text: String) -> String {
@@ -389,14 +383,19 @@ final class HomeViewModel: ObservableObject {
             .filter { $0.from.lowercased().starts(with: query) }
             .map { BusStop(id: "0", name: $0.from, lat: 0, lng: 0) }
         
-        if query.count < 2 {
+        if query.count < 3 {
             self.fromSuggestions = []
+            self.isSearchingFrom = false
             return
         }
         
+        self.isSearchingFrom = true
+        
         Task {
             // 2. API suggestions (Available from 2 characters)
-            let results = await StopSuggestionService.shared.suggestions(query: query)
+            let regNo = SessionManager.shared.currentUserRegNo
+            let role = SessionManager.shared.userRole ?? "student"
+            let results = await StopSuggestionService.shared.suggestions(query: query, regNo: regNo, role: role)
             await MainActor.run { 
                 guard self.fromText.lowercased() == query else { return }
                 
@@ -413,6 +412,7 @@ final class HomeViewModel: ObservableObject {
                 } else {
                     self.fromSuggestions = combined 
                 }
+                self.isSearchingFrom = false
             }
         }
     }
@@ -429,14 +429,19 @@ final class HomeViewModel: ObservableObject {
             .filter { $0.to.lowercased().starts(with: query) }
             .map { BusStop(id: "0", name: $0.to, lat: 0, lng: 0) }
             
-        if query.count < 2 {
+        if query.count < 3 {
             self.toSuggestions = []
+            self.isSearchingTo = false
             return
         }
         
+        self.isSearchingTo = true
+        
         Task {
             // 2. API suggestions (Available from 2 characters)
-            let results = await StopSuggestionService.shared.suggestions(query: query)
+            let regNo = SessionManager.shared.currentUserRegNo
+            let role = SessionManager.shared.userRole ?? "student"
+            let results = await StopSuggestionService.shared.suggestions(query: query, regNo: regNo, role: role)
             await MainActor.run { 
                 guard self.toText.lowercased() == query else { return }
                 
@@ -453,6 +458,7 @@ final class HomeViewModel: ObservableObject {
                 } else {
                     self.toSuggestions = combined 
                 }
+                self.isSearchingTo = false
             }
         }
     }
@@ -469,6 +475,41 @@ final class HomeViewModel: ObservableObject {
         toID = stop.id
         toStop = stop
         toSuggestions = []
+    }
+
+    // MARK: - Final Validation before Search
+    
+    /// Checks if typed stop names exist in the database and resolves them to IDs/Coordinates
+    /// Returns true if both from and to are valid.
+    func validateStopsBeforeSearch() async -> Bool {
+        // If already resolved, we're good
+        if fromID != nil && toID != nil && fromStop != nil && toStop != nil { return true }
+        
+        do {
+            let allStops = try await APIService.shared.fetchAllStops()
+            
+            // Try to resolve 'From' stop
+            if fromID == nil || fromStop == nil {
+                let match = allStops.first { $0.name.lowercased() == fromText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                if let m = match {
+                    selectFrom(m)
+                }
+            }
+            
+            // Try to resolve 'To' stop
+            if toID == nil || toStop == nil {
+                let match = allStops.first { $0.name.lowercased() == toText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                if let m = match {
+                    selectTo(m)
+                }
+            }
+            
+            return fromID != nil && toID != nil
+            
+        } catch {
+            print("Validation fetch failed: \(error)")
+            return false
+        }
     }
 
     // MARK: - Swap
@@ -488,6 +529,10 @@ final class HomeViewModel: ObservableObject {
         
         fromSuggestions = []
         toSuggestions = []
+    }
+    
+    func clearManualSearch() {
+        self.busNumberSearch = ""
     }
 
     // MARK: - Dynamic Header Helpers

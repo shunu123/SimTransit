@@ -189,19 +189,31 @@ struct SettingsView: View {
                         )
                     }
                     
-                    // ABOUT
+                    // SUPPORT & INFO
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("ABOUT")
+                        Text("SUPPORT & INFO")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(theme.current.accent)
                             .padding(.leading, 16)
                         
                         VStack(spacing: 0) {
-                            settingsRow(icon: "info.circle", title: "About App", value: "v2.1.0") {
+                            settingsRow(icon: "questionmark.circle", title: "Help & FAQ", value: nil) {
+                                router.go(.help)
+                            }
+                            
+                            Divider().padding(.leading, 50)
+                            
+                            settingsRow(icon: "exclamationmark.bubble", title: "Report Issue", value: nil) {
+                                router.go(.report)
+                            }
+                            
+                            Divider().padding(.leading, 50)
+                            
+                            settingsRow(icon: "info.circle", title: "About App", value: "v2.2.0") {
                                 router.go(.about)
                             }
                         }
-                        .background(theme.current.background)
+                        .background(theme.current.card)
                         .cornerRadius(12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
@@ -231,33 +243,6 @@ struct SettingsView: View {
                         }
                     }
 
-                    // SUPPORT & FEEDBACK (Student Only)
-                    if SessionManager.shared.userRole != "admin" {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("SUPPORT & FEEDBACK")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(theme.current.accent)
-                                .padding(.leading, 16)
-                            
-                            VStack(spacing: 0) {
-                                settingsRow(icon: "questionmark.circle", title: "Help & FAQ", value: nil) {
-                                    router.go(.help)
-                                }
-                                
-                                Divider().padding(.leading, 50)
-                                
-                                settingsRow(icon: "exclamationmark.bubble", title: "Report Issue", value: nil) {
-                                    router.go(.report)
-                                }
-                            }
-                            .background(theme.current.card)
-                            .cornerRadius(12)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(theme.current.border, lineWidth: 1)
-                            )
-                        }
-                    }
 
                     // LOGOUT
                     Button {

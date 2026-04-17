@@ -30,6 +30,7 @@ struct LiveTrackingMapView: View {
     @EnvironmentObject var locationManager: LocationManager
     @State private var showingCalendar = false
     @State private var showingBusDetails = false
+    @State private var showingTimeline = false
     
     // Scoped properties for builders
     private var busToTrack: Bus {
@@ -45,8 +46,13 @@ struct LiveTrackingMapView: View {
             if vm.isHistorical && vm.isHistoryEmpty && !vm.showScheduledStopsOnly {
                 emptyHistoryView
             } else {
-                Map(position: $position) {
+                Map(position: $position, interactionModes: .all) {
                     mapContent
+                }
+                .onChange(of: position) {
+                    if vm.autoRecenter && !vm.isHistorical {
+                        vm.autoRecenter = false
+                    }
                 }
                 .ignoresSafeArea()
                 
@@ -71,34 +77,96 @@ struct LiveTrackingMapView: View {
             
             if !isDeviatedMode {
                 if !(vm.isHistorical && vm.isHistoryEmpty) {
-                    dashboardLayer
-                        .ignoresSafeArea(edges: .bottom)
-                    
                     topControls
-                    
                     zoomControls
-
                     mapOverlays
                 } else {
-                    // Even in empty history, show top controls so user can go back or open calendar
                     topControls
                 }
             } else {
-                // In deviated mode, show only back button
+                topControls
+                deviationAlertOverlay
+            }
+
+            if vm.isWaitingForGPS && !vm.isHistorical {
                 VStack {
-                    HStack {
-                        // Redundant back button removed
-                        Spacer()
-                        Spacer()
+                    Spacer().frame(height: 120)
+                    HStack(spacing: 12) {
+                        ProgressView().tint(.white)
+                        Text("Waiting for GPS data from \(busToTrack.number)...")
+                            .font(.subheadline.bold())
                     }
-                    .padding(.top, 8)
-                    .padding(.horizontal, 16)
-                    Spacer()
+                    .padding()
+                    .background(RoundedRectangle(cornerRadius: 15).fill(Color.black.opacity(0.8)))
+                    .foregroundStyle(.white)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                     
-                    // Requirement 1: Deviated bus = just the map + red polyline + optional back
-                    deviationAlertOverlay
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+                .zIndex(10)
+            }
+            
+            // Recenter/Fetch Button
+            if !vm.autoRecenter && !vm.isHistorical && !vm.isWaitingForGPS {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button {
+                            withAnimation(.spring()) {
+                                vm.autoRecenter = true
+                                if let coord = vm.currentCoordinate.lat != 0 ? vm.currentCoordinate : nil {
+                                    position = .region(MKCoordinateRegion(center: coord.cl, span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)))
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "location.fill")
+                                Text("Refetch")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(Capsule().fill(theme.current.accent))
+                            .foregroundStyle(.white)
+                            .shadow(radius: 5, y: 3)
+                        }
+                        .padding(.trailing, 20)
+                        .padding(.bottom, 300) // Above the sheet
+                    }
+                }
+                .zIndex(5)
+            }
+        }
+        .sheet(isPresented: .constant(true)) {
+            VStack(spacing: 0) {
+                // Puller Handle
+                Capsule()
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: 40, height: 5)
+                    .padding(.top, 10)
+                    .padding(.bottom, 10)
+
+                FloatingTrackingCard(vm: vm)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+                    .padding(.bottom, 20)
+                
+                // 1. Bus Info Header (Visible in Collapsed/Medium/Large)
+                // Header is now integrated into the floating card
+                
+                Divider().padding(.vertical)
+                
+                // 2. Timeline (Scrollable)
+                ScrollView(showsIndicators: false) {
+                    RouteTimelineView(vm: vm)
+                        .padding(.bottom, 30)
                 }
             }
+            .presentationDetents([.height(280), .medium, .large])
+            .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+            .interactiveDismissDisabled()
         }
         .sheet(isPresented: $showingCalendar) {
             VStack {
@@ -118,16 +186,20 @@ struct LiveTrackingMapView: View {
         }
         .onAppear {
             vm.start()
-            position = .region(regionForStops(vm.stops))
+            if let liveCoord = vm.currentCoordinate.lat != 0 ? vm.currentCoordinate : nil {
+                position = .region(MKCoordinateRegion(center: liveCoord.cl, span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)))
+            } else {
+                position = .region(regionForStops(vm.stops))
+            }
         }
-        .onChange(of: vm.isHistorical) { _, isHist in
+        .onChange(of: vm.isHistorical) { (old: Bool, isHist: Bool) in
             if isHist {
                 withAnimation {
                     position = .region(regionForStops(vm.stops))
                 }
             }
         }
-        .onChange(of: vm.currentCoordinate) { _, newCoord in
+        .onChange(of: vm.currentCoordinate) { (old: Coord, newCoord: Coord) in
             guard vm.autoRecenter && !vm.isHistorical else { return }
             withAnimation(.easeInOut(duration: 3.0)) {
                 position = .region(
@@ -137,6 +209,21 @@ struct LiveTrackingMapView: View {
                     )
                 )
             }
+        }
+        .onChange(of: vm.stops) { (old: [Stop], newStops: [Stop]) in
+            guard !newStops.isEmpty else { return }
+            if vm.currentCoordinate.lat != 0 {
+                // Keep focus on bus if moving
+                return 
+            }
+            withAnimation(.easeInOut(duration: 1.5)) {
+                position = .region(regionForStops(newStops))
+            }
+        }
+        .onChange(of: vm.bus) { (old: Bus, newBus: Bus) in
+            // Refresh path calculation if bus model core changes
+            // e.g. switching between different buses in search
+            vm.recalculateTwoColorPaths()
         }
         .onChange(of: vm.selectedBusForDetail) { _, newBus in
             if let bus = newBus, !bus.route.stops.isEmpty {
@@ -153,26 +240,16 @@ struct LiveTrackingMapView: View {
 
     @MapContentBuilder
     private var mapContent: some MapContent {
-        // Underlay: Full Planned Route (Gray Dashed)
-        MapPolyline(coordinates: vm.plannedPolyline.map { $0.cl })
-            .stroke(Color.gray.opacity(0.6), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [6, 6]))
+        // Underlay: Full Planned Route (Gray Dashed) - Only show if high-fidelity path is missing
+        if vm.fullRoutePath.isEmpty {
+            MapPolyline(coordinates: vm.plannedPolyline.map { $0.cl })
+                .stroke(Color.gray.opacity(0.6), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [6, 6]))
+        }
 
         if busToTrack.isDeviated {
             deviatedMapContent(for: busToTrack)
         } else {
             standardMapContent(for: busToTrack)
-        }
-
-        // Search Source/Destination Markers (If coordinates provided)
-        if let sc = vm.sourceCoord {
-            Annotation("Source", coordinate: sc.cl) {
-                MarkerLabel(text: "A", color: .blue)
-            }
-        }
-        if let dc = vm.destinationCoord {
-            Annotation("Destination", coordinate: dc.cl) {
-                MarkerLabel(text: "B", color: .purple)
-            }
         }
     }
 
@@ -194,7 +271,7 @@ struct LiveTrackingMapView: View {
             historyMarkers(for: busToTrack)
             rejoinMarkers()
         } else {
-            Annotation("Bus \(busToTrack.number)", coordinate: vm.currentCoordinate.cl) {
+            Annotation("", coordinate: vm.currentCoordinate.cl) {
                 BusMapMarker(bus: busToTrack, theme: theme, isMain: true, isSelected: true)
             }
         }
@@ -256,32 +333,64 @@ struct LiveTrackingMapView: View {
 
     @MapContentBuilder
     private func standardMapContent(for busToTrack: Bus) -> some MapContent {
-        // 1. Blue segments (On-route actual path)
-        ForEach(vm.actualOnRouteSegments) { segment in
-            MapPolyline(coordinates: segment.coords.map { $0.cl })
+        // 1. Searched Segment (Solid highlighted path ONLY)
+        if !vm.tripPath.isEmpty {
+            MapPolyline(coordinates: vm.tripPath.map { $0.cl })
                 .stroke(theme.current.accent, style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
         }
+
+
         
-        // 2. Red segments (Off-route deviation actual path) - though in "standard" this should be empty
+        // 4. Deviation Log (Red)
         ForEach(vm.actualOffRouteSegments) { segment in
             MapPolyline(coordinates: segment.coords.map { $0.cl })
-                .stroke(Color.red, style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
-        }
-        
-        // 3. Upcoming planned route (Dimmed Dashed)
-        let startIndex = Int(vm.currentIndex)
-        if startIndex < vm.fullRoutePath.count - 1 {
-            let upcomingPath = Array(vm.fullRoutePath[startIndex...])
-            MapPolyline(coordinates: upcomingPath.map { $0.cl })
-                .stroke(theme.current.accent.opacity(0.3), style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [4, 4]))
+                .stroke(Color.red, style: StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
         }
 
-        ForEach(0..<vm.stops.count, id: \.self) { index in
-            stopAnnotation(for: index, stop: vm.stops[index])
+        // 3. Stop Annotations
+        ForEach(Array(vm.stops.enumerated()), id: \.element.id) { index, s in
+            let normalize = { (txt: String) in txt.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            let sName = normalize(s.name)
+            let isSource = vm.sourceName.isEmpty ? (index == 0) : (sName.contains(normalize(vm.sourceName)) || normalize(vm.sourceName).contains(sName))
+            let isEnd = index == vm.stops.count - 1
+            
+            let sourceIndex = vm.stops.firstIndex(where: { 
+                let n = normalize($0.name)
+                return vm.sourceName.isEmpty ? false : (n.contains(normalize(vm.sourceName)) || normalize(vm.sourceName).contains(n))
+            }) ?? 0
+            
+            let isIntermediate = index > sourceIndex && index < vm.stops.count - 1
+            
+            let validCoord: CLLocationCoordinate2D = {
+                if s.coordinate.lat != 0 && s.coordinate.lon != 0 { return s.coordinate.cl }
+                guard !vm.fullRoutePath.isEmpty, vm.stops.count > 1 else { return s.coordinate.cl }
+                let fraction = Double(index) / Double(vm.stops.count - 1)
+                let polyIndex = min(vm.fullRoutePath.count - 1, Int(fraction * Double(vm.fullRoutePath.count - 1)))
+                return vm.fullRoutePath[polyIndex].cl
+            }()
+            
+            if isSource {
+                Annotation(s.name, coordinate: validCoord) {
+                    StopLocationMarker(icon: "📍", color: .green, isTerminal: true)
+                }
+            } else if isEnd {
+                Annotation(s.name, coordinate: validCoord) {
+                    StopLocationMarker(icon: "📍", color: .red, isTerminal: true)
+                }
+            } else if isIntermediate {
+                Annotation(s.name, coordinate: validCoord) {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 8, height: 8)
+                        .overlay(Circle().stroke(theme.current.accent, lineWidth: 2))
+                        .shadow(radius: 1)
+                }
+            }
         }
 
-        if !vm.isHistorical && (!vm.isIsolatedMode || vm.selectedBusForDetail?.id == vm.bus.id) {
-            Annotation("Bus \(vm.bus.number)", coordinate: vm.currentCoordinate.cl) {
+        // 4. Live Bus Marker
+        if !vm.isHistorical && (!vm.isIsolatedMode || vm.selectedBusForDetail?.id == vm.bus.id) && vm.currentCoordinate.lat != 0 {
+            Annotation("", coordinate: vm.currentCoordinate.cl) {
                 BusMapMarker(bus: vm.bus, theme: theme, isMain: true, isSelected: vm.selectedBusForDetail?.id == vm.bus.id)
                     .onTapGesture { 
                         withAnimation(.spring()) { 
@@ -292,6 +401,7 @@ struct LiveTrackingMapView: View {
             }
         }
         
+        // 5. Other Visible Buses
         if !vm.isHistorical && !vm.isIsolatedMode {
             let visibleBuses = vm.otherBuses.filter { bus in
                 switch bus.trackingStatus {
@@ -304,7 +414,7 @@ struct LiveTrackingMapView: View {
             ForEach(visibleBuses) { otherBus in
                 if otherBus.currentStopIndex >= 0 && otherBus.currentStopIndex < otherBus.route.stops.count {
                     let stop = otherBus.route.stops[otherBus.currentStopIndex]
-                    Annotation(otherBus.number, coordinate: stop.coordinate.cl) {
+                    Annotation("", coordinate: stop.coordinate.cl) {
                         BusMapMarker(bus: otherBus, theme: theme, isMain: false, isSelected: vm.selectedBusForDetail?.id == otherBus.id)
                             .onTapGesture { 
                                 withAnimation(.spring()) { 
@@ -316,47 +426,6 @@ struct LiveTrackingMapView: View {
                 }
             }
         }
-    }
-
-    @MapContentBuilder
-    private func stopAnnotation(for index: Int, stop s: Stop) -> some MapContent {
-        let busToTrack = vm.selectedBusForDetail ?? vm.bus
-        let currentIndexValue = (busToTrack.id == vm.bus.id) ? vm.currentIndex : Double(busToTrack.currentStopIndex)
-        let liveIndexValue = Int(currentIndexValue)
-        
-        let isPast = index < liveIndexValue
-        let isCurrent = index == liveIndexValue
-        
-        let isStart = index == 0
-        let isEnd = index == vm.stops.count - 1
-        let isTerminal = isStart || isEnd
-        
-        let shouldShowLabel = isCurrent || isTerminal || (index % 5 == 0)
-        
-        if shouldShowLabel || vm.selectedBusForDetail != nil {
-            Annotation(shouldShowLabel ? s.name : "", coordinate: s.coordinate.cl) {
-                if isStart {
-                    StopLocationMarker(icon: "📍", color: .green, isTerminal: true)
-                } else if isEnd {
-                    StopLocationMarker(icon: "📍", color: .red, isTerminal: true)
-                } else if isCurrent {
-                    Image(systemName: "mappin.circle.fill")
-                        .font(.title)
-                        .foregroundStyle(theme.current.accent)
-                        .background(Circle().fill(.white))
-                } else {
-                    StopLocationMarker(icon: "📍", color: isPast ? .gray : theme.current.accent, isTerminal: false)
-                }
-            }
-        } else {
-            // Minimalist dot for other stops to reduce View count
-            Annotation("", coordinate: s.coordinate.cl) {
-                Circle()
-                    .fill(isPast ? theme.current.accent.opacity(0.4) : Color.gray.opacity(0.3))
-                    .frame(width: 4, height: 4)
-            }
-        }
-    }
 
     @ViewBuilder
     private var mapOverlays: some View {
@@ -364,23 +433,6 @@ struct LiveTrackingMapView: View {
         EmptyView()
     }
 
-    @ViewBuilder
-    private var dashboardLayer: some View {
-        VStack(spacing: 0) {
-            Spacer()
-            VStack(alignment: .leading, spacing: 16) {
-                if vm.isHistorical {
-                    historicalDashboard
-                } else {
-                    liveDashboard
-                }
-            }
-            .padding(24)
-            .background(Color.white)
-            .cornerRadius(30)
-            .shadow(color: Color.black.opacity(0.1), radius: 20, y: -5)
-        }
-    }
 
     @ViewBuilder
     private var historicalDashboard: some View {
@@ -413,9 +465,9 @@ struct LiveTrackingMapView: View {
             }
             
             HStack {
-                Text(vm.stops.first?.name ?? "Start")
+                Text(vm.bus.route.startPointName)
                 Image(systemName: "arrow.right")
-                Text(vm.stops.last?.name ?? "End")
+                Text(vm.bus.route.endPointName)
             }
             .font(.subheadline.bold())
             .foregroundStyle(.gray)
@@ -491,12 +543,17 @@ struct LiveTrackingMapView: View {
                     let statusText: String = {
                         if displayBus.hasReachedDestination { return "REACHED" }
                         if displayBus.isDeviated { return "DEVIATED" }
+                        if vm.isApproachingSource && !vm.pickupPath.isEmpty { return "APPROACHING PICKUP" }
                         return (displayBus.liveTelemetry.speedKmph ?? 0) <= 1 ? "STOPPED" : "RUNNING"
                     }()
                     
                     Text(statusText)
                         .font(.caption.bold())
-                        .foregroundStyle(statusText == "DEVIATED" ? .red : (statusText == "REACHED" ? .blue : .green))
+                        .foregroundStyle(
+                            statusText == "DEVIATED" ? .red : 
+                            (statusText == "REACHED" ? .blue : 
+                            (statusText == "APPROACHING PICKUP" ? .orange : .green))
+                        )
                 }
                 
                 Spacer()
@@ -548,9 +605,9 @@ struct LiveTrackingMapView: View {
             }
             
             HStack {
-                Text(vm.stops.first?.name ?? "Start")
+                Text(vm.sourceName.isEmpty ? (vm.displayedStops.first?.name ?? "Source") : vm.sourceName)
                 Image(systemName: "arrow.right")
-                Text(vm.stops.last?.name ?? "End")
+                Text(vm.destName.isEmpty ? (vm.displayedStops.last?.name ?? "Destination") : vm.destName)
             }
             .font(.subheadline.bold())
             .foregroundStyle(.gray)
@@ -579,39 +636,49 @@ struct LiveTrackingMapView: View {
                             Text("Next Stop")
                                 .font(.caption.bold())
                                 .foregroundStyle(.gray)
-                            Text(vm.nextStop?.name ?? "Arrived")
+                            Text(vm.nextStopName.isEmpty ? (vm.nextStop?.name ?? "Arriving Soon") : vm.nextStopName)
                                 .font(.headline.bold())
                         }
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 4) {
-                        Text("Duration")
+                        Text("Duration Taken")
+                            .font(.caption.bold())
+                            .foregroundStyle(.gray)
+                        Text("\(vm.durationTakenMinutes) mins")
+                            .font(.headline.bold())
+                            .foregroundStyle(theme.current.accent)
+                    }
+                }
+                
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("ETA to Destination")
                             .font(.caption.bold())
                             .foregroundStyle(.gray)
                         Text("\(vm.durationToDestination) mins")
-                            .font(.headline.bold())
+                            .font(.subheadline.bold())
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("Arrival at Next Stop")
+                            .font(.caption.bold())
+                            .foregroundStyle(.gray)
+                        Text(vm.arrivalAtNextStop ?? "--:--")
+                            .font(.subheadline.bold())
                     }
                 }
             }
             
             HStack(spacing: 12) {
-                Button { router.back() } label: {
-                    Text("Detailed Timeline")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(theme.current.accent)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 44)
-                        .background(RoundedRectangle(cornerRadius: 12).stroke(theme.current.accent.opacity(0.3), lineWidth: 1))
-                }
-                
                 if !displayBus.isDeviated {
                     Button { showAlarm = true } label: {
-                        Text("Set Alarm")
+                        Text("Set Arrival Alarm")
                             .font(.subheadline.bold())
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 44)
-                            .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange))
+                            .frame(height: 50)
+                            .background(RoundedRectangle(cornerRadius: 15).fill(Color.orange))
                     }
                 }
             }
@@ -621,38 +688,106 @@ struct LiveTrackingMapView: View {
     @ViewBuilder
     private var topControls: some View {
         VStack {
-            HStack {
+            HStack(spacing: 16) {
+                Button {
+                    router.back()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(theme.current.text)
+                        .frame(width: 50, height: 50)
+                        .background(
+                            Circle()
+                                .fill(theme.current.card)
+                                .shadow(color: .black.opacity(0.1), radius: 8, x: 0, y: 4)
+                        )
+                }
+                
+                Text(vm.bus.number)
+                    .font(.title3.weight(.black))
+                    .foregroundStyle(theme.current.text)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(theme.current.card).shadow(radius: 4))
+                
                 Spacer()
-                HStack(spacing: 10) {
-                    if SessionManager.shared.userRole == "admin" {
-                        Button { showingCalendar = true } label: {
-                            Image(systemName: "calendar")
-                                .font(.title3.weight(.bold))
-                                .foregroundStyle(theme.current.accent)
-                                .frame(width: 44, height: 44)
-                                .background(Circle().fill(theme.current.card).shadow(radius: 2))
-                        }
-                    }
-                    
-                    // Dedicated Refresh Button – top right, does NOT overlap map controls
+                
+                HStack(spacing: 12) {
+                    // Refresh Button
                     Button {
                         vm.refresh()
-                        withAnimation(.easeInOut(duration: 1.0)) {
-                            position = .region(regionForStops(vm.stops))
-                        }
                     } label: {
                         Image(systemName: "arrow.clockwise")
-                            .font(.title3.weight(.bold))
+                            .font(.system(size: 18, weight: .bold))
                             .foregroundStyle(theme.current.accent)
                             .frame(width: 44, height: 44)
-                            .background(Circle().fill(theme.current.card).shadow(radius: 2))
+                            .background(Circle().fill(theme.current.card))
+                            .shadow(radius: 4)
+                    }
+                    
+                    // Admin Calendar
+                    if SessionManager.shared.userRole == "admin" {
+                        Button {
+                            showingCalendar.toggle()
+                        } label: {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(theme.current.accent)
+                                .frame(width: 44, height: 44)
+                                .background(Circle().fill(theme.current.card))
+                                .shadow(radius: 4)
+                        }
                     }
                 }
             }
-            .padding(.top, 56) // Below dynamic island / status bar
-            .padding(.horizontal, 16)
-
+            .padding(.top, 60)
+            .padding(.horizontal, 20)
+            
             Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var floatingMapTools: some View {
+        VStack {
+            Spacer()
+            HStack {
+                HStack(spacing: 20) {
+                    Button { 
+                        withAnimation { 
+                            position = .region(MKCoordinateRegion(center: vm.currentCoordinate.cl, span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)))
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Bus \(vm.bus.number)")
+                                .font(.system(size: 14, weight: .black, design: .rounded))
+                        }
+                    }
+                    
+                    Button { 
+                        // Mock location
+                    } label: {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 16, weight: .bold))
+                    }
+                    
+                    Button { 
+                        // Mock layers
+                    } label: {
+                        Image(systemName: "square.3.layers.3d")
+                            .font(.system(size: 16, weight: .bold))
+                    }
+                }
+                .padding(.horizontal, 24)
+                .frame(height: 54)
+                .background(
+                    Capsule()
+                        .fill(theme.current.card)
+                        .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 6)
+                )
+                .foregroundStyle(theme.current.accent)
+            }
+            .padding(.bottom, 260)
         }
     }
     
@@ -717,24 +852,44 @@ struct LiveTrackingMapView: View {
     }
 
     private func regionForStops(_ stops: [Stop]) -> MKCoordinateRegion {
-        guard !stops.isEmpty else {
-            return MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 13.0287, longitude: 80.0071),
-                                      span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
-        }
+        // Filter out any stops with 0,0 coordinates
+        let validStops = stops.filter { $0.coordinate.lat != 0 && $0.coordinate.lon != 0 }
         
-        // Calculate bounding box instead of just First stop
+        // Start with stops bounds
         var minLat = 90.0, maxLat = -90.0
         var minLon = 180.0, maxLon = -180.0
-        
-        for stop in stops {
+        var foundAny = false
+
+        for stop in validStops {
             minLat = min(minLat, stop.coordinate.lat)
             maxLat = max(maxLat, stop.coordinate.lat)
             minLon = min(minLon, stop.coordinate.lon)
             maxLon = max(maxLon, stop.coordinate.lon)
+            foundAny = true
+        }
+
+        // Also include full high-res path if available
+        if !vm.fullRoutePath.isEmpty {
+            for coord in vm.fullRoutePath {
+                minLat = min(minLat, coord.lat)
+                maxLat = max(maxLat, coord.lat)
+                minLon = min(minLon, coord.lon)
+                maxLon = max(maxLon, coord.lon)
+                foundAny = true
+            }
+        }
+        
+        if !foundAny {
+            // Sensible fallback (Saveetha University area) if no valid data
+            let fallbackCenter = (vm.sourceCoord?.lat != 0 && vm.sourceCoord?.lat != nil) ? vm.sourceCoord!.cl : 
+                                 (vm.currentCoordinate.lat != 0 ? vm.currentCoordinate.cl : 
+                                  CLLocationCoordinate2D(latitude: 13.0292, longitude: 80.0165))
+            return MKCoordinateRegion(center: fallbackCenter,
+                                      span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
         }
         
         let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2)
-        let span = MKCoordinateSpan(latitudeDelta: max(maxLat - minLat + 0.02, 0.02), longitudeDelta: max(maxLon - minLon + 0.02, 0.02))
+        let span = MKCoordinateSpan(latitudeDelta: max(maxLat - minLat + 0.05, 0.05), longitudeDelta: max(maxLon - minLon + 0.05, 0.05))
         
         return MKCoordinateRegion(center: center, span: span)
     }
@@ -763,7 +918,7 @@ struct LiveTrackingMapView: View {
                     }
                 }
                 .padding(.trailing, 16)
-                .padding(.bottom, 240) // Positioned above dashboard
+                .padding(.bottom, 80) // Positioned lower on screen
             }
         }
     }
@@ -790,19 +945,21 @@ struct BusMapMarker: View {
     var body: some View {
         VStack(spacing: 4) {
             VStack(alignment: .center, spacing: 2) {
-                Text(bus.number).font(.caption2.bold())
-                let statusText = bus.isDeviated ? "Deviated" : (bus.liveTelemetry.isHalted ? "Halted" : "Running")
-                Text(statusText).font(.system(size: 8, weight: .semibold))
+                Text(bus.number)
+                    .font(.system(size: 10, weight: .black, design: .rounded))
                 if let eta = bus.displayETA {
-                    Text("\(eta)m").font(.system(size: 8, weight: .black))
+                    Text("\(eta)m").font(.system(size: 8, weight: .heavy))
                 }
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(markerColor.shadow(.drop(color: .black.opacity(0.2), radius: 2)))
-            .cornerRadius(6)
-            .scaleEffect(isSelected ? 1.2 : 1.0)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(markerColor)
+                    .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
+            )
+            .scaleEffect(isSelected ? 1.15 : 1.0)
             
             ZStack {
                 Circle()
@@ -936,5 +1093,104 @@ extension LiveTrackingMapView {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.white)
+    }
+}
+struct FloatingTrackingCard: View {
+    @ObservedObject var vm: LiveTrackingViewModel
+    @EnvironmentObject var theme: ThemeManager
+    @State private var pulseOpacity = 0.6
+    
+    var body: some View {
+        let displayBus = vm.selectedBusForDetail ?? vm.bus
+        let isRunning = (displayBus.liveTelemetry.speedKmph ?? 0) > 1
+        
+        VStack(spacing: 16) {
+            // Header: ID + Live Status
+            HStack {
+                HStack(spacing: 8) {
+                    Image(systemName: "bus.fill")
+                        .foregroundStyle(theme.current.accent)
+                    Text(displayBus.number)
+                        .font(.title3.bold())
+                        .foregroundStyle(theme.current.accent)
+                }
+                
+                Spacer()
+                
+                // Pulsing LIVE indicator
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(vm.isWaitingForGPS ? .gray : (isRunning ? .green : .orange))
+                        .frame(width: 8, height: 8)
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                                pulseOpacity = 1.0
+                            }
+                        }
+                    
+                    Text(vm.isWaitingForGPS ? "CONNECTING..." : (isRunning ? "LIVE" : "HALTED"))
+                        .font(.system(size: 10, weight: .black))
+                        .foregroundStyle(vm.isWaitingForGPS ? .gray : (isRunning ? .green : .orange))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background((isRunning ? Color.green : Color.orange).opacity(0.1))
+                .clipShape(Capsule())
+            }
+            
+            // Route Segment
+            HStack {
+                Text(vm.sourceName.isEmpty ? "Source" : vm.sourceName)
+                Image(systemName: "arrow.right")
+                    .font(.caption.bold())
+                    .foregroundStyle(theme.current.secondaryText)
+                Text(vm.destName.isEmpty ? "Destination" : vm.destName)
+            }
+            .font(.subheadline.bold())
+            .foregroundStyle(theme.current.secondaryText)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            
+            Divider()
+            
+            // Middle: Next Stop + Highlighted ETA
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("NEXT STOP")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(theme.current.secondaryText)
+                    Text(vm.nextStop?.name ?? "End Component")
+                        .font(.headline.bold())
+                        .foregroundStyle(theme.current.text)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text("ARRIVAL")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundStyle(theme.current.secondaryText)
+                    
+                    Text(vm.arrivalAtNextStop ?? "--:--")
+                        .font(.callout.bold())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(theme.current.accent)
+                                .shadow(color: theme.current.accent.opacity(0.3), radius: 4, y: 2)
+                        )
+                }
+            }
+            
+
+        }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(theme.current.card)
+                .shadow(color: .black.opacity(0.12), radius: 20, x: 0, y: 10)
+        )
     }
 }

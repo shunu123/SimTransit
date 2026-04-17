@@ -70,47 +70,56 @@ final class StudentDashboardViewModel: ObservableObject {
     }
     
     func refreshDashboard() {
-        guard let location = currentUserLocation else { return }
-        
+        isLoading = true
         Task {
-            isLoading = true
-            error = nil
-            
             do {
-                if allStops.isEmpty {
-                    allStops = try await apiService.fetchAllStops()
+                let all = try await apiService.fetchAllStops()
+                self.allStops = all
+                if let loc = currentUserLocation {
+                    findNearbyStops(from: loc)
                 }
-                
-                // Find top 2 nearest stops
-                let stops = shortestPathService.findNearestStops(from: location.coordinate, to: allStops, count: 2)
-                self.nearbyStops = stops
-                
-                for stop in stops {
-                    let d = location.distance(from: CLLocation(latitude: stop.lat, longitude: stop.lng)) / 1000.0
-                    self.distances[stop.id] = d
-                    
-                    calculateWalkingRoute(for: stop)
-                }
-                
-                wsService.connect()
-                
             } catch {
-                self.error = "Failed to load dashboard: \(error.localizedDescription)"
+                self.error = "Could not load stops: \(error.localizedDescription)"
             }
-            
             isLoading = false
+        }
+    }
+    
+    private func findNearbyStops(from location: CLLocation) {
+        // 1. Filter stops within 5km (5000 meters) and sort by proximity (straight-line for ranking)
+        let filteredAndSorted = allStops
+            .filter { stop in
+                CLLocation(latitude: stop.lat, longitude: stop.lng).distance(from: location) <= 5000
+            }
+            .sorted { s1, s2 in
+                let d1 = CLLocation(latitude: s1.lat, longitude: s1.lng).distance(from: location)
+                let d2 = CLLocation(latitude: s2.lat, longitude: s2.lng).distance(from: location)
+                return d1 < d2
+            }
+        
+        // 2. Limit to top 10 closest stops for detailed route calculation
+        let discovered = Array(filteredAndSorted.prefix(10))
+        self.nearbyStops = discovered
+        
+        // 3. Batch calculate actual walking routes for accuracy
+        for stop in discovered {
+            calculateWalkingRoute(to: stop, from: location)
+        }
+        
+        // 4. Auto-select the nearest stop if none selected
+        if let first = discovered.first, selectedStop == nil {
+            selectStop(first)
         }
     }
     
     func selectStop(_ stop: BusStop) {
         self.selectedStop = stop
-        fetchBuses(for: stop)
-        saveSearch(nearest: stop)
+        if let loc = currentUserLocation {
+            calculateWalkingRoute(to: stop, from: loc)
+        }
     }
     
-    private func calculateWalkingRoute(for stop: BusStop) {
-        guard let location = currentUserLocation else { return }
-        
+    private func calculateWalkingRoute(to stop: BusStop, from location: CLLocation) {
         let request = MKDirections.Request()
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: location.coordinate))
         request.destination = MKMapItem(placemark: MKPlacemark(coordinate: stop.coordinate))
@@ -118,58 +127,30 @@ final class StudentDashboardViewModel: ObservableObject {
         
         let directions = MKDirections(request: request)
         directions.calculate { [weak self] response, error in
-            guard let self = self, let route = response?.routes.first else { return }
-            DispatchQueue.main.async {
-                self.routes[stop.id] = route
-                self.walkingTimes[stop.id] = route.expectedTravelTime
-            }
-        }
-    }
-    
-    private func fetchBuses(for stop: BusStop) {
-        Task {
-            do {
-                let trips = try await apiService.fetchBusesForStop(stopId: stop.id)
-                self.arrivingBuses = trips.map { trip in
-                    Bus(
-                        id: UUID(),
-                        number: trip.busNo ?? "N/A",
-                        headsign: trip.routeName ?? "Transit",
-                        departsAt: trip.firstDeparture ?? "--",
-                        durationText: "--",
-                        status: .onTime,
-                        statusDetail: trip.status ?? "Live",
-                        trackingStatus: .arriving,
-                        etaMinutes: nil,
-                        route: Route(from: "", to: "", stops: []),
-                        vehicleId: trip.tripId,
-                        busId: trip.busId,
-                        extTripId: trip.extTripId
-                    )
+            guard let self = self else { return }
+            if let route = response?.routes.first {
+                DispatchQueue.main.async {
+                    self.routes[stop.id] = route
+                    self.walkingTimes[stop.id] = route.expectedTravelTime
+                    // USE ACTUAL ROUTE DISTANCE (meters -> km)
+                    self.distances[stop.id] = route.distance / 1000.0
                 }
-            } catch {
-                print("Failed to fetch buses for stop \(stop.id): \(error)")
             }
         }
     }
     
-    private func saveSearch(nearest: BusStop) {
-        guard let location = currentUserLocation else { return }
-        let studentId = SessionManager.shared.currentUser?.id ?? 0
-        let dist = distances[nearest.id] ?? 0
-        
-        Task {
-            try? await apiService.saveStudentStopSearch(
-                studentId: studentId,
-                lat: location.coordinate.latitude,
-                lng: location.coordinate.longitude,
-                nearestStopId: Int(nearest.id) ?? 0,
-                distance: dist
-            )
-        }
+    func openInMaps() {
+        guard let selected = selectedStop else { return }
+        let mapItem = MKMapItem(placemark: MKPlacemark(coordinate: selected.coordinate))
+        mapItem.name = selected.name
+        mapItem.openInMaps(launchOptions: [
+            MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeWalking
+        ])
     }
     
     deinit {
-        wsService.disconnect()
+        Task { @MainActor [wsService] in
+            wsService.disconnect()
+        }
     }
 }

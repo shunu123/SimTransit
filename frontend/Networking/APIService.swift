@@ -10,15 +10,8 @@ struct APIObjectResponse<T: Decodable>: Decodable {
     let data: T?
 }
 
-struct StopsAPIResponse: Decodable {
-    let stops: [BusStop]
-    
-    enum CodingKeys: String, CodingKey {
-        case stops
-    }
-}
-
 // Transit models moved to TransitModels.swift
+// Models consolidated in Model/BusModels.swift and Networking/APIConfig.swift
 
 
 enum APIError: LocalizedError {
@@ -52,12 +45,30 @@ struct CreateTripIn: Encodable {
     let stops: [CreateTripStopIn]
 }
 
+struct LLMIntentResponse: Decodable {
+    let command: String
+    let from_stop: String?
+    let to_stop: String?
+    let bus_number: String?
+    let screen: String?
+    let speech_response: String?
+    let language_code: String?
+}
+
 final class APIService {
 
     static let shared = APIService()
     private init() {}
 
     private let decoder = JSONDecoder()
+
+    func parseVoiceIntent(transcript: String) async throws -> LLMIntentResponse {
+        guard let url = URL(string: "\(APIConfig.baseURL)/api/voice/intent") else {
+            throw APIError.decodingError("Invalid URL for voice intent")
+        }
+        let body = ["transcript": transcript]
+        return try await post(url, body: body, as: LLMIntentResponse.self)
+    }
 
     private func fetch<T: Decodable>(_ url: URL, as type: T.Type) async throws -> T {
         print("API CALL:", url.absoluteString)
@@ -72,10 +83,8 @@ final class APIService {
         if let http = response as? HTTPURLResponse {
             print("STATUS:", http.statusCode)
             
-            // Permanent fix: check status BEFORE decoding
             guard (200...299).contains(http.statusCode) else {
-                // Try to extract a human-readable error message from the JSON body
-                var msg = "Unknown error"
+                var msg = "Server error \(http.statusCode)"
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     if let detailStr = json["detail"] as? String {
                         msg = detailStr
@@ -83,7 +92,7 @@ final class APIService {
                               let err = detailDict["error"] as? String {
                         msg = err
                     }
-                } else if let rawStr = String(data: data, encoding: .utf8)?.prefix(200).description {
+                } else if let rawStr = String(data: data, encoding: .utf8) {
                     msg = rawStr
                 }
                 throw APIError.decodingError(msg)
@@ -136,7 +145,9 @@ final class APIService {
 
     // MARK: - Stops
     func fetchStops(routeId: String, dir: String) async throws -> [BusStop] {
-        let url = URL(string: "\(APIConfig.baseURL)/api/stops?rt=\(routeId)&dir=\(dir)")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/api/stops?rt=\(routeId)&dir=\(dir)") else {
+            throw APIError.decodingError("Invalid URL for fetchStops")
+        }
         struct TransitStop: Decodable {
             let stpid: String
             let stpnm: String
@@ -148,7 +159,9 @@ final class APIService {
     }
 
     func fetchAllStops() async throws -> [BusStop] {
-        let url = URL(string: "\(APIConfig.baseURL)/stops")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/stops") else {
+            throw APIError.decodingError("Invalid URL for fetchAllStops")
+        }
         struct DBStop: Decodable {
             let id: Int
             let name: String
@@ -160,7 +173,9 @@ final class APIService {
     }
 
     func fetchRoutes(q: String = "", offset: Int = 0) async throws -> (routes: [BusRoute], total: Int) {
-        var comps = URLComponents(string: "\(APIConfig.baseURL)/api/routes")!
+        guard var comps = URLComponents(string: "\(APIConfig.baseURL)/api/routes") else {
+            throw APIError.decodingError("Invalid URL for fetchRoutes")
+        }
         comps.queryItems = [
             URLQueryItem(name: "q", value: q),
             URLQueryItem(name: "limit", value: "100"),
@@ -188,14 +203,10 @@ final class APIService {
 
     // MARK: - All Daily Buses
     func fetchBuses(forRoute: String? = nil) async throws -> [DailyBusTrip] {
-        let today = {
-            let f = DateFormatter()
-            f.dateFormat = "yyyy-MM-dd"
-            f.timeZone = TimeZone(identifier: "Asia/Kolkata")
-            return f.string(from: Date())
-        }()
-        
-        var comps = URLComponents(string: "\(APIConfig.baseURL)/buses")!
+        let today = ISO8601DateFormatter().string(from: Date()).prefix(10).description
+        guard var comps = URLComponents(string: "\(APIConfig.baseURL)/buses") else {
+            throw APIError.decodingError("Invalid URL for fetchBuses")
+        }
         var queryItems: [URLQueryItem] = [URLQueryItem(name: "service_date", value: today)]
         if let forRoute { queryItems.append(URLQueryItem(name: "route", value: forRoute)) }
         comps.queryItems = queryItems
@@ -203,23 +214,26 @@ final class APIService {
         let resp = try await fetch(comps.url!, as: APIListResponse<DailyBusTrip>.self)
         
         // Register these buses in the repository so they are available for mapping
-        for trip in resp.data {
-             let bus = Bus(
-                 id: UUID(),
-                 number: trip.busNo ?? "N/A",
-                 headsign: trip.routeName ?? "Transit Route",
-                 departsAt: "--",
-                 durationText: "--",
-                 status: .onTime,
-                 statusDetail: "Live",
-                 trackingStatus: .scheduled,
-                 etaMinutes: nil,
-                 route: Route(from: "", to: "", stops: []),
-                 vehicleId: trip.tripId,
-                 busId: trip.busId,
-                 extTripId: trip.extTripId
-             )
-             BusRepository.shared.register(bus: bus)
+        await MainActor.run {
+            for trip in resp.data {
+                 let stableUUID = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012x", trip.tripId)) ?? UUID()
+                 let bus = Bus(
+                     id: stableUUID,
+                     number: trip.busNo ?? "N/A",
+                     headsign: trip.routeName ?? "Transit Route",
+                     departsAt: "--",
+                     durationText: "--",
+                     status: .onTime,
+                     statusDetail: "Live",
+                     trackingStatus: .scheduled,
+                     etaMinutes: nil,
+                     route: Route(from: "", to: "", stops: []),
+                     vehicleId: trip.tripId,
+                     busId: trip.busId,
+                     extTripId: trip.extTripId
+                 )
+                 BusRepository.shared.register(bus: bus)
+            }
         }
         
         return resp.data
@@ -239,7 +253,9 @@ final class APIService {
     }
 
     func searchTrips(fromStopId: String, toStopId: String, routeId: String = "20", dir: String = "Eastbound") async throws -> [SearchTrip] {
-        var comps = URLComponents(string: "\(APIConfig.baseURL)/api/track")!
+        guard var comps = URLComponents(string: "\(APIConfig.baseURL)/api/track") else {
+            throw APIError.decodingError("Invalid URL for searchTrips")
+        }
         comps.queryItems = [
             URLQueryItem(name: "route_id", value: routeId),
             URLQueryItem(name: "from_stop_id", value: fromStopId),
@@ -247,7 +263,8 @@ final class APIService {
             URLQueryItem(name: "dir", value: dir)
         ]
 
-        let resp = try await fetch(comps.url!, as: TransitTrackResponse.self)
+        guard let url = comps.url else { throw APIError.decodingError("Invalid URL components for searchTrips") }
+        let resp = try await fetch(url, as: TransitTrackResponse.self)
         
         let durStr = resp.duration.replacingOccurrences(of: "m", with: "")
         
@@ -268,36 +285,45 @@ final class APIService {
             status: isLive ? "Live" : "Scheduled",
             busLiveLocation: resp.bus_live_location,
             nextStopName: nil,
-            currentStopName: nil
+            currentStopName: nil,
+            routeStartName: resp.from_stop,
+            routeEndName: resp.to_stop
         )
         return [trip]
     }
 
     /// Name-based bus search — calls /api/routes/search with stop name strings.
     /// Returns all buses that travel from `fromName` → `toName` without requiring stop IDs.
-    func fetchRoutesSearch(fromName: String, toName: String) async throws -> [SearchTrip] {
+    func fetchRoutesSearch(fromName: String, toName: String, regNo: String? = nil, role: String? = nil) async throws -> [SearchTrip] {
         guard let fromEnc = fromName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let toEnc = toName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
             return []
         }
-        let url = URL(string: "\(APIConfig.baseURL)/api/routes/search?from_stop=\(fromEnc)&to_stop=\(toEnc)")!
+        var urlString = "\(APIConfig.baseURL)/api/routes/search?from_stop=\(fromEnc)&to_stop=\(toEnc)"
+        if let r = regNo { urlString += "&reg_no=\(r)" }
+        if let rl = role { urlString += "&role=\(rl)" }
+        guard let url = URL(string: urlString) else { throw APIError.decodingError("Invalid URL for fetchRoutesSearch") }
         let resp = try await fetch(url, as: APIListResponse<SearchTrip>.self)
         return resp.data
     }
 
     func fetchFullTripDetails(routeId: String, direction: String, vehicleId: String) async throws -> TransitFullTripResponse {
-        var comps = URLComponents(string: "\(APIConfig.baseURL)/api/trip/full_details")!
+        guard var comps = URLComponents(string: "\(APIConfig.baseURL)/api/trip/full_details") else {
+             throw APIError.decodingError("Invalid URL for fetchFullTripDetails")
+        }
         comps.queryItems = [
             URLQueryItem(name: "rt", value: routeId),
             URLQueryItem(name: "dir", value: direction),
             URLQueryItem(name: "vid", value: vehicleId)
         ]
-        
-        return try await fetch(comps.url!, as: TransitFullTripResponse.self)
+        guard let url = comps.url else { throw APIError.decodingError("Invalid URL components for fetchFullTripDetails") }
+        return try await fetch(url, as: TransitFullTripResponse.self)
     }
 
     func fetchRouteStops(routeId: Int) async throws -> [Stop] {
-        let url = URL(string: "\(APIConfig.baseURL)/api/routes/\(routeId)/stops")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/api/routes/\(routeId)/stops") else {
+            throw APIError.decodingError("Invalid URL for fetchRouteStops")
+        }
         struct StopNode: Decodable {
             let stop_id: Int
             let name: String
@@ -311,24 +337,38 @@ final class APIService {
         }
     }
 
+
     // MARK: - Timeline
-    func fetchTimeline(tripId: Int? = nil, extTripId: String? = nil) async throws -> [TimelineStop] {
-        let identifier = extTripId ?? "\(tripId ?? 0)"
-        let urlString = "\(APIConfig.baseURL)/trips/\(identifier)/timeline"
-        let url = URL(string: urlString)!
+    func fetchTimeline(tripId: Int? = nil, extTripId: String? = nil) async throws -> (stops: [TimelineStop], polyline: String?) {
+        let identifier = "\(tripId ?? 0)"
+        guard var comps = URLComponents(string: "\(APIConfig.baseURL)/api/trip/timeline") else {
+            throw APIError.decodingError("Invalid URL for fetchTimeline")
+        }
+        var items = [URLQueryItem(name: "trip_id", value: identifier)]
+        if let etid = extTripId {
+            items.append(URLQueryItem(name: "ext_trip_id", value: etid))
+        }
+        comps.queryItems = items
+        guard let url = comps.url else { throw APIError.decodingError("Invalid URL components for fetchTimeline") }
         
         do {
-            let resp = try await fetch(url, as: APIListResponse<TimelineStop>.self)
-            return resp.data
+            let resp = try await fetch(url, as: TransitTimelineResponse.self)
+            return (resp.timeline, resp.polyline)
         } catch {
-            let resp = try await fetch(url, as: [TimelineStop].self)
-            return resp
+            print("API: Error fetching timeline for \(identifier): \(error.localizedDescription)")
+            // Fallback: If the response is a raw list (legacy support)
+            if let legacyResp = try? await fetch(url, as: [TimelineStop].self) {
+                return (legacyResp, nil)
+            }
+            throw error
         }
     }
 
     // MARK: - Latest GPS
-    func fetchLatestGPS(tripId: Int? = nil, extTripId: String? = nil, routeId: Int? = nil) async throws -> GPSPoint? {
-        var comps = URLComponents(string: "\(APIConfig.baseURL)/api/gps/latest")!
+    func fetchLatestGPS(tripId: Int? = nil, extTripId: String? = nil) async throws -> GPSPoint? {
+        guard var comps = URLComponents(string: "\(APIConfig.baseURL)/api/gps/latest") else {
+             throw APIError.decodingError("Invalid URL for fetchLatestGPS")
+        }
         var items: [URLQueryItem] = []
         if let tid = tripId {
             items.append(URLQueryItem(name: "trip_id", value: "\(tid)"))
@@ -338,20 +378,44 @@ final class APIService {
         }
         comps.queryItems = items
 
-        let resp = try await fetch(comps.url!, as: APIObjectResponse<GPSPoint>.self)
+        guard let url = comps.url else { throw APIError.decodingError("Invalid URL components for fetchLatestGPS") }
+        let resp = try await fetch(url, as: APIObjectResponse<GPSPoint>.self)
+        return resp.data
+    }
+
+    // MARK: - Live GPS for Trip
+    func fetchTripLatestGPS(tripId: Int? = nil, extTripId: String? = nil) async throws -> GPSPoint? {
+        let identifier = extTripId ?? "\(tripId ?? 0)"
+        let url = URL(string: "\(APIConfig.baseURL)/trips/\(identifier)/latest-gps")!
+        
+        struct GPSResponse: Decodable {
+            let ok: Bool
+            let data: GPSPoint?
+            let error: String?
+        }
+        
+        let resp = try await fetch(url, as: GPSResponse.self)
+        if !resp.ok { 
+            print("API: fetchTripLatestGPS failed: \(resp.error ?? "unknown")")
+            return nil 
+        }
         return resp.data
     }
 
     // MARK: - Live Fleet Mapping
     func fetchLiveFleetGPS() async throws -> [GPSPoint] {
-        let url = URL(string: "\(APIConfig.baseURL)/gps/live")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/gps/live") else {
+            throw APIError.decodingError("Invalid URL for fetchLiveFleetGPS")
+        }
         let resp = try await fetch(url, as: APIListResponse<GPSPoint>.self)
         return resp.data
     }
 
     // MARK: - Update GPS
     func updateGPS(tripId: Int, busId: Int, lat: Double, lng: Double, speed: Double? = nil, heading: Double? = nil) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/gps")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/gps") else {
+            throw APIError.decodingError("Invalid URL for updateGPS")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -376,7 +440,9 @@ final class APIService {
 
     // MARK: - Recent Searches
     func saveRecentSearch(fromStopId: String, toStopId: String, fromName: String, toName: String, userId: Int? = nil) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/recent_searches")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/recent_searches") else {
+            throw APIError.decodingError("Invalid URL for saveRecentSearch")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -403,7 +469,9 @@ final class APIService {
     }
 
     func saveStudentStopSearch(studentId: Int, lat: Double, lng: Double, nearestStopId: Int, distance: Double) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/student-stop-search")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/student-stop-search") else {
+            throw APIError.decodingError("Invalid URL for saveStudentStopSearch")
+        }
         let body: [String: Any] = [
             "student_id": studentId,
             "current_lat": lat,
@@ -425,27 +493,43 @@ final class APIService {
     }
 
     func fetchBusesForStop(stopId: String) async throws -> [DailyBusTrip] {
-        let url = URL(string: "\(APIConfig.baseURL)/buses?stop_id=\(stopId)")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/buses?stop_id=\(stopId)") else {
+            throw APIError.decodingError("Invalid URL for fetchBusesForStop")
+        }
         let resp = try await fetch(url, as: APIListResponse<DailyBusTrip>.self)
         return resp.data
     }
 
     func fetchRecentSearches(role: String = "student", userId: Int? = nil) async throws -> [RecentSearch] {
-        var urlComp = URLComponents(string: "\(APIConfig.baseURL)/recent_searches")!
+        guard var urlComp = URLComponents(string: "\(APIConfig.baseURL)/recent_searches") else {
+             throw APIError.decodingError("Invalid URL for fetchRecentSearches")
+        }
         var items = [URLQueryItem(name: "role", value: role)]
         if let uid = userId {
             items.append(URLQueryItem(name: "user_id", value: "\(uid)"))
         }
         urlComp.queryItems = items
         
-        let resp = try await fetch(urlComp.url!, as: APIListResponse<RecentSearch>.self)
+        guard let url = urlComp.url else { throw APIError.decodingError("Invalid URL components for fetchRecentSearches") }
+        let resp = try await fetch(url, as: APIListResponse<RecentSearch>.self)
         return resp.data
     }
 
-    func fetchTripHistory(tripId: Int) async throws -> [GPSPoint] {
-        let url = URL(string: "\(APIConfig.baseURL)/gps/history?trip_id=\(tripId)")!
+    func fetchTripHistory(tripId: Int, date: String? = nil) async throws -> [GPSPoint] {
+        var urlString = "\(APIConfig.baseURL)/api/gps/history?trip_id=\(tripId)"
+        if let d = date { urlString += "&date=\(d)" }
+        let url = URL(string: urlString)!
         let resp = try await fetch(url, as: APIListResponse<GPSPoint>.self)
         return resp.data
+    }
+
+    func fetchTripCoordinates(tripId: Int, date: String? = nil) async throws -> [Coord] {
+        var urlString = "\(APIConfig.baseURL)/api/trip/\(tripId)/points"
+        if let d = date { urlString += "?date=\(d)" }
+        let url = URL(string: urlString)!
+        struct Point: Decodable { let latitude: Double; let longitude: Double }
+        let resp = try await fetch(url, as: APIListResponse<Point>.self)
+        return resp.data.map { Coord(lat: $0.latitude, lon: $0.longitude) }
     }
     
     func fetchFleetHistory(date: String) async throws -> [FleetTrip] {
@@ -455,9 +539,9 @@ final class APIService {
     }
 
     // AUTH
-    func login(regNoOrEmail: String, password: [String: String]) async throws -> (user: User?, requiresOTP: Bool, target: String?) {
+    func login(regNoOrEmail: String, password: String) async throws -> (user: User?, requiresOTP: Bool, target: String?) {
         let url = URL(string: "\(APIConfig.baseURL)/login")!
-        let body = ["reg_no_or_email": regNoOrEmail, "password": password["password"] ?? ""]
+        let body = ["reg_no_or_email": regNoOrEmail, "password": password]
         let resp = try await post(url, body: body, as: AuthResponse.self)
         
         if resp.requires_otp == true {
@@ -465,19 +549,34 @@ final class APIService {
         }
         
         if let user = resp.user {
-            return (user, false, nil)
+            return (user: user, requiresOTP: false, target: nil)
         }
         throw APIError.serverError(401, resp.detail ?? "Login failed")
     }
 
     func register(userData: [String: Any]) async throws -> Bool {
-        let url = URL(string: "\(APIConfig.baseURL)/register")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/register") else {
+            throw APIError.decodingError("Invalid URL for register")
+        }
+        
         let resp = try await post(url, body: userData.compactMapValues { "\($0)" }, as: GenericResponse.self)
         return resp.ok
     }
 
+    func register(name: String, email: String, phone: String, pin: String, role: String) async throws -> User {
+        guard let url = URL(string: "\(APIConfig.baseURL)/register") else {
+            throw APIError.decodingError("Invalid URL for register")
+        }
+        let body: [String: Any] = ["name": name, "email": email, "phone": phone, "pin": pin, "role": role]
+        let resp = try await post(url, body: body.compactMapValues { "\($0)" }, as: AuthResponse.self)
+        guard let user = resp.user else { throw APIError.serverError(500, "Registration failed") }
+        return user
+    }
+
     func sendOTP(target: String, isAdmin: Bool = false, isRegistration: Bool = false) async throws -> (ok: Bool, target: String?) {
-        let url = URL(string: "\(APIConfig.baseURL)/send_otp")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/send_otp") else {
+            throw APIError.decodingError("Invalid URL for sendOTP")
+        }
         let body: [String: Any] = ["target": target, "is_admin": isAdmin, "is_registration": isRegistration]
         
         var request = URLRequest(url: url)
@@ -499,29 +598,43 @@ final class APIService {
         return (true, nil)
     }
 
-    func verifyOTP(target: String, otp: String, isAdmin: Bool = false) async throws -> User? {
-        let url = URL(string: "\(APIConfig.baseURL)/verify_otp")!
-        let body: [String: Any] = ["target": target, "code": otp, "is_admin": isAdmin]
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-             let msg = String(data: data, encoding: .utf8)?.prefix(200).description ?? "Unknown API Error"
-             throw APIError.serverError(http.statusCode, msg)
+    func verifyOTP(target: String, otp: String, isAdmin: Bool) async throws -> User? {
+        if let url = URL(string: "\(APIConfig.baseURL)/verify_otp") {
+            let body: [String: Any] = ["target": target, "otp": otp, "is_admin": isAdmin]
+            let resp = try await post(url, body: body.compactMapValues { "\($0)" }, as: AuthResponse.self)
+            return resp.user
         }
-        
-        let decoder = JSONDecoder()
-        let resp = try decoder.decode(AuthResponse.self, from: data)
-        return resp.user
+        return nil
+    }
+
+    func verifyOTP(phone: String, otp: String) async throws -> String {
+        if let url = URL(string: "\(APIConfig.baseURL)/verify_otp") {
+            let body: [String: Any] = ["phone": phone, "code": otp]
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                 let msg = String(data: data, encoding: .utf8)?.prefix(200).description ?? "Unknown API Error"
+                 throw APIError.serverError(http.statusCode, msg)
+            }
+            
+            let decoder = JSONDecoder()
+            let resp = try decoder.decode(AuthResponse.self, from: data)
+            guard let token = resp.token else { throw APIError.serverError(401, "Invalid OTP") }
+            return token
+        }
+        throw APIError.decodingError("Invalid URL for verifyOTP")
     }
     
-    func resetPassword(email: String, newPassword: String) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/reset_password")!
-        let body: [String: Any] = ["email": email, "new_password": newPassword]
+    func resetPassword(phone: String, newPin: String) async throws {
+        guard let url = URL(string: "\(APIConfig.baseURL)/reset_password") else {
+            throw APIError.decodingError("Invalid URL for resetPassword")
+        }
+        let body: [String: Any] = ["phone": phone, "new_pin": newPin]
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -536,10 +649,28 @@ final class APIService {
     }
 
     // SUPPORT
-    func postReport(email: String?, subject: String, message: String, category: String) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/report")!
+    // ───────────────────────── SUPPORT & REPORTING ──────────────────────
+
+    /// Reports a general issue (simplified version)
+    func reportIssue(title: String, description: String, userId: Int?) async throws {
+        guard let url = URL(string: "\(APIConfig.baseURL)/report") else {
+            throw APIError.decodingError("Invalid URL for reportIssue")
+        }
         let body: [String: Any] = [
-            "user_email": email ?? "",
+            "title": title,
+            "description": description,
+            "user_id": userId ?? 0
+        ]
+        _ = try await post(url, body: body.compactMapValues { "\($0)" }, as: GenericResponse.self)
+    }
+
+    /// Primary method for and User Feedback/Issue reporting
+    func postReport(email: String?, subject: String, message: String, category: String) async throws {
+        guard let url = URL(string: "\(APIConfig.baseURL)/report") else {
+            throw APIError.decodingError("Invalid URL for postReport")
+        }
+        let body: [String: Any] = [
+            "email": email ?? "anonymous",
             "subject": subject,
             "message": message,
             "category": category
@@ -547,18 +678,25 @@ final class APIService {
         _ = try await post(url, body: body.compactMapValues { "\($0)" }, as: GenericResponse.self)
     }
 
-    func postContact(email: String?, subject: String, message: String) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/contact")!
+    /// Posts a contact message from the Help screen
+    func postContact(name: String, email: String, subject: String, message: String) async throws {
+        guard let url = URL(string: "\(APIConfig.baseURL)/contact") else {
+            throw APIError.decodingError("Invalid URL for postContact")
+        }
         let body: [String: Any] = [
-            "user_email": email ?? "",
+            "name": name,
+            "email": email,
             "subject": subject,
             "message": message
         ]
         _ = try await post(url, body: body.compactMapValues { "\($0)" }, as: GenericResponse.self)
     }
 
+    /// Reports a driver-specific issue
     func postDriverReport(email: String, busNumber: String, driverInfo: String, description: String) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/report_driver")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/report_driver") else {
+            throw APIError.decodingError("Invalid URL for postDriverReport")
+        }
         let body: [String: Any] = [
             "user_email": email,
             "bus_number": busNumber,
@@ -570,7 +708,9 @@ final class APIService {
 
     /// Admin: Fetch all registered students
     func fetchStudents() async throws -> [StudentRecord] {
-        let url = URL(string: "\(APIConfig.baseURL)/students")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/students") else {
+            throw APIError.decodingError("Invalid URL for fetchStudents")
+        }
         let res = try await fetch(url, as: StudentsResponse.self)
         if !res.ok {
             throw APIError.serverError(0, "Failed to load students")
@@ -580,18 +720,11 @@ final class APIService {
 
     // MARK: - Admin Scheduling
     func createTrip(_ trip: CreateTripIn) async throws {
-        let url = URL(string: "\(APIConfig.baseURL)/trips")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/trips") else {
+            throw APIError.decodingError("Invalid URL for createTrip")
+        }
         let _ = try await post(url, body: trip, as: APIObjectResponse<Int>.self)
     }
-}
-
-struct RecentSearch: Codable, Identifiable {
-    let id: Int
-    let from_stop_id: String
-    let to_stop_id: String
-    let from_name: String
-    let to_name: String
-    let ts: String
 }
 
 struct GPSIn: Codable {
@@ -629,14 +762,14 @@ struct AdminHistoryMapPoint: Codable {
 
 struct AdminHistoryTrip: Codable, Identifiable {
     let trip_id: Int?
-    let bus_number: String
-    let route_name: String
-    let points: [AdminHistoryMapPoint]
+    let bus_number: String?
+    let route_name: String?
+    let points: [AdminHistoryMapPoint]?
     let ext_vehicle_id: String?
     
     var id: String {
         if let tid = trip_id, tid != 0 { return "\(tid)" }
-        return ext_vehicle_id ?? bus_number
+        return ext_vehicle_id ?? bus_number ?? UUID().uuidString
     }
 }
 
@@ -663,7 +796,9 @@ private struct AdminHistoryDatesResponse: Codable {
 // MARK: - Admin History API methods
 extension APIService {
     func fetchAdminHistoryDates() async throws -> [String] {
-        let url = URL(string: "\(APIConfig.baseURL)/api/admin/history/dates")!
+        guard let url = URL(string: "\(APIConfig.baseURL)/api/admin/history/dates") else {
+            throw APIError.decodingError("Invalid URL for fetchAdminHistoryDates")
+        }
         let resp = try await fetch(url, as: AdminHistoryDatesResponse.self)
         return resp.dates
     }
