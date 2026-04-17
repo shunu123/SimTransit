@@ -34,13 +34,6 @@ const Counter = ({ target, suffix = '' }) => {
     return <span ref={ref}>{count}{suffix}</span>;
 };
 
-const stats = [
-    { value: '500', suffix: '+', label: 'Students Active' },
-    { value: '99', suffix: '%', label: 'Server Uptime' },
-    { value: '24', suffix: '/7', label: 'Live Support' },
-    { value: '4.9', suffix: '', label: 'User Rating' },
-];
-
 const Home = () => {
     return (
         <>
@@ -103,28 +96,6 @@ const Home = () => {
                         </motion.div>
                     </div>
                 </div>
-            </div>
-
-            {/* ── Stats ── */}
-            <div style={s.statsWrap}>
-                <hr className="glow-line" />
-                <div style={s.statsGrid}>
-                    {stats.map((st, i) => (
-                        <motion.div
-                            key={i}
-                            style={s.statItem}
-                            initial={{ opacity: 0, y: 15 }}
-                            whileInView={{ opacity: 1, y: 0 }}
-                            viewport={{ once: true, margin: '-30px' }}
-                            transition={{ duration: 0.45, delay: i * 0.08 }}
-                        >
-                            <div style={s.statVal}><Counter target={st.value} suffix={st.suffix} /></div>
-                            <div style={s.statLbl}>{st.label}</div>
-                        </motion.div>
-                    ))}
-                </div>
-                <hr className="glow-line" />
-            </div>
         </>
     );
 };
